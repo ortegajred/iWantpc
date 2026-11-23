@@ -53,6 +53,16 @@
                 </table>
             </div>
         </section>
+
+        <section class="card">
+            <div class="section-head"><h2>Service &amp; Warranty Requests</h2></div>
+            <div class="table-wrap">
+                <table class="data-table">
+                    <thead><tr><th>Ticket ID</th><th>Customer</th><th>Device / Part</th><th>Type</th><th>Issue Details</th><th>Status</th><th>Update</th></tr></thead>
+                    <tbody id="staffTicketsBody"></tbody>
+                </table>
+            </div>
+        </section>
     </main>
 
     <!-- Add / edit component. The spec fields below are generated from the chosen category (see SPEC_FIELDS in script.js). -->
@@ -99,6 +109,7 @@
     </dialog>
 
     <footer id="footer"></footer>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script src="script.js"></script>
 </body>
 </html>
