@@ -58,11 +58,16 @@ const SHIPPING_FEE = 15;
 const ASSEMBLY_FEE = 50;
 const ASSEMBLY_ID = 'svc-assembly';
 const CATEGORIES = {
-    processors: 'Processors',
+    processors: 'Processors (CPU)',
     motherboards: 'Motherboards',
-    memory: 'Memory',
-    'graphics-cards': 'Graphics cards',
-    'power-supplies': 'Power supplies'
+    memory: 'Memory (RAM)',
+    'graphics-cards': 'Graphics cards (GPU)',
+    'power-supplies': 'Power supplies (PSU)',
+    storage: 'Storage',
+    case: 'PC Cases',
+    cooler: 'CPU Coolers',
+    peripheral: 'Peripherals',
+    other: 'Other components'
 };
 const ORDER_STATUS = {
     pending:   { label: 'Pending Payment', icon: 'fa-hourglass-half' },
@@ -830,63 +835,39 @@ pages['pc-builder'] = async () => {
 };
 
 pages.checkout = async () => {
-    const user = guard();
-    if (!user) return;
-    const body = $('#checkoutBody');
-    const empty = () => { body.innerHTML = '<div class="card empty-state"><i class="fa-solid fa-cart-shopping"></i><p>Your cart is empty.</p><a href="home.html" class="btn btn-primary">Browse products</a></div>'; };
-    let cart = getCart();
-    if (!cart.length) return empty();
-
-    try { await Products.load(); }
-    catch (err) { body.innerHTML = errorCard(err.message); body.addEventListener('click', e => { if (e.target.closest('[data-retry]')) location.reload(); }); return; }
-
-    /* re-price against the live catalog and drop anything that is gone or sold out */
-    const dropped = [];
-    cart = cart.filter(i => {
-        if (i.service) return true;
-        const p = Products.get(i.id);
-        if (!p || p.stock < 1) { dropped.push(i.title); return false; }
-        i.price = p.price; i.title = p.title; i.qty = Math.min(i.qty, p.stock);
-        return true;
-    });
-    saveCart(cart);
-    if (dropped.length) toast(`No longer available and removed: ${esc(dropped.join(', '))}`, 'error');
-    if (!cart.some(i => !i.service)) { saveCart([]); return empty(); }
-
-    const t = totals(cart);
-    $('#summaryRows').innerHTML = cart.map(i => `<div class="summary-row"><span>${esc(i.title)} (x${i.qty})</span><span>${money(i.price * i.qty)}</span></div>`).join('') +
-        `<div class="summary-row"><span>Subtotal</span><span>${money(t.subtotal)}</span></div>
-         <div class="summary-row"><span>Estimated Tax (${TAX_RATE * 100}%)</span><span>${money(t.tax)}</span></div>
-         <div class="summary-row"><span>Shipping Fee</span><span>${money(t.shipping)}</span></div>`;
-    $('#sumTotal').textContent = money(t.total);
-    const address = [user.address, user.city, user.zip].filter(Boolean).join(', ');
-    $('#shipTo').innerHTML = address ? `Ship to: <strong>${esc(address)}</strong>. <a href="accountsetting.html">Change</a>` : 'No shipping address yet. <a href="accountsetting.html">Add one in Account Settings</a>.';
-    const buildNote = localStorage.getItem(KEY.buildNote);
-    if (buildNote) $('#checkoutForm').elements.note.value = buildNote;
-
-    $('#checkoutForm').addEventListener('submit', async e => {
-        e.preventDefault();
-        const btn = $('button[type="submit"]', e.target), label = btn.innerHTML;
-        btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Placing order...';
-        try {
-            await Products.adjustStock(cart, -1);      /* atomic: fails with a clear message if anything is short */
-            const form = new FormData(e.target), payment = form.get('payment');
-            const orders = read(KEY.orders, []);
-            orders.unshift({
-                id: uid('ORD-2026-'), email: user.email, customer: user.name,
-                items: cart.map(({ id, title, price, qty, service }) => ({ id, title, price, qty, ...(service ? { service: true } : {}) })),
-                total: t.total, status: payment === 'cod' ? 'toship' : 'pending', payment, note: form.get('note').trim(),
-                placed: new Date().toISOString().slice(0, 10), receiveDate: '', proof: ''
+    const user=guard();if(!user)return;
+    if(!(await requireCompleteProfile()))return;
+    const body=$('#checkoutBody');let cart=await loadCartFromDatabase();
+    if(!cart.length){body.innerHTML='<div class="card empty-state"><p>Your cart is empty.</p><a href="home.html" class="btn btn-primary">Browse products</a></div>';return;}
+    await Products.load();
+    cart=cart.map(i=>{const p=Products.get(i.id);return p?{id:p.id,title:p.title,price:p.price,qty:Math.min(i.qty,p.stock)}:null;}).filter(i=>i&&i.qty>0);
+    if(!cart.length)throw new Error('Your cart items are no longer available.');
+    const t=totals(cart),address=[user.address,user.city,user.zip].filter(Boolean).join(', ');
+    $('#summaryRows').innerHTML=cart.map(i=>`<div class="summary-row"><span>${esc(i.title)} (x${i.qty})</span><span>${money(i.price*i.qty)}</span></div>`).join('')+
+      `<div class="summary-row"><span>Subtotal</span><span>${money(t.subtotal)}</span></div><div class="summary-row"><span>Tax</span><span>${money(t.tax)}</span></div><div class="summary-row"><span>Shipping</span><span>${money(t.shipping)}</span></div>`;
+    $('#sumTotal').textContent=money(t.total);$('#shipTo').textContent='Ship to: '+address;
+    $('#checkoutForm').elements.payment.innerHTML='<option value="gcash" selected>GCash</option>';
+    $('#checkoutForm').addEventListener('submit',async e=>{
+        e.preventDefault();const btn=$('button[type="submit"]',e.target);btn.disabled=true;
+        try{
+            const fd=new FormData(e.target),addressPayload={user_id:user.id,street:user.address,city:user.city,postal_code:user.zip,country:'PH',is_default:true};
+            const {data:existing,error:findError}=await sbClient.from('address').select('address_id').eq('user_id',user.id).eq('is_default',true).maybeSingle();
+            if(findError)throw findError;
+            let addressId;
+            if(existing){
+                const {data,error}=await sbClient.from('address').update(addressPayload).eq('address_id',existing.address_id).select('address_id').single();
+                if(error)throw error;addressId=data.address_id;
+            }else{
+                const {data,error}=await sbClient.from('address').insert(addressPayload).select('address_id').single();
+                if(error)throw error;addressId=data.address_id;
+            }
+            const {data:orderId,error}=await sbClient.rpc('place_order_secure',{
+                p_address_id:addressId,p_items:cart.map(i=>({component_id:Number(i.id),quantity:i.qty})),
+                p_payment_method:'gcash',p_customer_note:fd.get('note')||''
             });
-            write(KEY.orders, orders);
-            saveCart([]);
-            localStorage.removeItem(KEY.buildNote);
-            toast('Order placed successfully!');
-            setTimeout(() => { location.href = 'myorders.html'; }, 900);
-        } catch (err) {
-            toast(esc(err.message), 'error');
-            btn.disabled = false; btn.innerHTML = label;
-        }
+            if(error)throw error;if(!orderId)throw new Error('The database did not return the new order number.');
+            write(KEY.cart,[]);await syncCartToDatabase([]);toast('Order placed and saved to your purchase history.');location.href='myorders.html';
+        }catch(err){toast(err.message,'error');btn.disabled=false;}
     });
 };
 
@@ -1185,12 +1166,35 @@ async function loadAuthUser() {
     return AUTH_USER;
 }
 
+// UI keys stay readable; these values exactly match public.component_category.
+const CATEGORY_ALIASES = {
+    processors: ['processors','processor','cpu','proccesor','proccessor'],
+    motherboards: ['motherboards','motherboard','mainboard'],
+    memory: ['memory','ram','rams'],
+    'graphics-cards': ['graphics-cards','graphics_cards','graphics card','gpu','gpus'],
+    'power-supplies': ['power-supplies','power_supplies','power supply','psu'],
+    storage: ['storage','ssd','hdd'],
+    case: ['case','cases','pc case'],
+    cooler: ['cooler','coolers','cpu cooler'],
+    peripheral: ['peripheral','peripherals'],
+    other: ['other','others','other component']
+};
+const categoryToUi = value => {
+    const raw = String(value || '').trim().toLowerCase();
+    return Object.entries(CATEGORY_ALIASES).find(([, aliases]) => aliases.includes(raw))?.[0] || raw;
+};
+const categoryToDatabase = value => ({
+    processors:'cpu', motherboards:'motherboard', memory:'ram',
+    'graphics-cards':'gpu', 'power-supplies':'psu',
+    storage:'storage', case:'case', cooler:'cooler', peripheral:'peripheral', other:'other'
+}[categoryToUi(value)] || String(value || '').trim().toLowerCase());
 const componentToProduct = r => ({
-    ...r, id: r.component_id, title: r.name, stock: Number(r.stock_level) || 0,
-    price: Number(r.price) || 0, image: r.image_url || '', description: r.description || '',
-    specs: { ...(r.specs || {}), socket: r.socket || r.specs?.socket,
-        memory_type: r.ram_type || r.specs?.memory_type,
-        wattage: r.psu_watts || r.specs?.wattage, min_psu_watts: r.min_psu_watts || r.specs?.min_psu_watts }
+    ...r, id:r.component_id, title:r.name, category:categoryToUi(r.category),
+    stock:Number(r.stock_level)||0, price:Number(r.price)||0,
+    image:r.image_url||'', description:r.description||'',
+    specs:{...(r.specs||{}),socket:r.socket||r.specs?.socket,
+        memory_type:r.ram_type||r.specs?.memory_type,
+        wattage:r.psu_watts||r.specs?.wattage,min_psu_watts:r.min_psu_watts||r.specs?.min_psu_watts}
 });
 Object.assign(Products, {
     async load() {
@@ -1203,7 +1207,7 @@ Object.assign(Products, {
         const specs = data.specs || {};
         const payload = {
             name: data.title, sku: ('IWP-' + data.title).toUpperCase().replace(/[^A-Z0-9]+/g, '-').slice(0, 48) + '-' + Date.now().toString().slice(-5),
-            category: data.category, description: data.description || '', price: data.price, stock_level: data.stock,
+            category: categoryToDatabase(data.category), description: data.description || '', price: data.price, stock_level: data.stock,
             image_url: data.image, specs, socket: specs.socket || null,
             ram_type: specs.memory_type && ['DDR4','DDR5'].includes(specs.memory_type) ? specs.memory_type : null,
             psu_watts: specs.wattage || null, min_psu_watts: specs.min_psu_watts || null
@@ -1219,7 +1223,7 @@ Object.assign(Products, {
         if ('price' in changes) payload.price = changes.price;
         if ('stock' in changes) payload.stock_level = changes.stock;
         if ('image' in changes) payload.image_url = changes.image;
-        if ('category' in changes) payload.category = changes.category;
+        if ('category' in changes) payload.category = categoryToDatabase(changes.category);
         if ('specs' in changes) {
             payload.specs = changes.specs;
             payload.socket = changes.specs.socket || null;
@@ -1360,19 +1364,34 @@ pages.home = async () => {
         }
     });
     $$('[data-prefill]').forEach(b=>b.addEventListener('click',()=>$('#bookingType').value=b.dataset.prefill));
+    const bookingType=$('#bookingType'), originalDeviceInput=$('#bookingDevice').outerHTML;
+    const deviceLabel=$('#bookingDevice').closest('label');
+    const loadWarrantyChoices=async()=>{
+        if(!bookingType.value.toLowerCase().includes('warranty')){
+            if($('#bookingDevice').tagName==='SELECT')deviceLabel.innerHTML='<span>Device / part</span>'+originalDeviceInput;
+            return;
+        }
+        const {data:orders,error}=await sbClient.from('orders').select('order_id,order_item(order_item_id,product_id,item_name)').eq('user_id',user.id).eq('order_status','completed');
+        if(error)throw error;
+        const purchased=(orders||[]).flatMap(o=>(o.order_item||[]).map(i=>({...i,order_id:o.order_id}))).filter(i=>i.product_id!=null);
+        const unique=[...new Map(purchased.map(i=>[String(i.product_id),i])).values()];
+        deviceLabel.innerHTML='<span>Purchased device / part</span><select id="bookingDevice" required><option value="">Select a purchased component</option>'+unique.map(i=>`<option value="${esc(i.product_id)}">${esc(i.item_name||'Component')} — Order #${esc(i.order_id)}</option>`).join('')+'</select>';
+        if(!unique.length)$('#bookingDevice').innerHTML='<option value="">No completed purchases available</option>';
+    };
+    bookingType.addEventListener('change',()=>loadWarrantyChoices().catch(err=>toast(err.message,'error')));
+    if(bookingType.value.toLowerCase().includes('warranty'))await loadWarrantyChoices();
     $('#bookingForm').addEventListener('submit',async e=>{
-        e.preventDefault(); if(!(await requireCompleteProfile()))return;
-        const type=$('#bookingType').value, device=$('#bookingDevice').value.trim(), details=$('#bookingDetails').value.trim();
-        try {
+        e.preventDefault();if(!(await requireCompleteProfile()))return;
+        const type=bookingType.value,device=$('#bookingDevice').value.trim(),details=$('#bookingDetails').value.trim();
+        try{
             if(type.toLowerCase().includes('warranty')){
-                const {data:orders,error}=await sbClient.from('orders').select('order_id,order_status,order_item(order_item_id,product_id,item_name,quantity)').eq('user_id',user.id).eq('order_status','completed');
+                const {data:orders,error}=await sbClient.from('orders').select('order_id,order_item(order_item_id,product_id,item_name)').eq('user_id',user.id).eq('order_status','completed');
                 if(error)throw error;
-                const matches=(orders||[]).flatMap(o=>(o.order_item||[]).map(i=>({...i,order_id:o.order_id}))).filter(i=>(i.item_name||'').toLowerCase()===device.toLowerCase()||String(i.product_id)===device);
-                if(!matches.length)throw new Error('Warranty claims are accepted only for items in your completed purchases. Enter the exact purchased product name or product ID.');
-                const item=matches[0];
+                const item=(orders||[]).flatMap(o=>(o.order_item||[]).map(i=>({...i,order_id:o.order_id}))).find(i=>String(i.product_id)===device);
+                if(!item)throw new Error('Warranty claims are accepted only for components in your completed purchases.');
                 const {error:we}=await sbClient.from('warranty_request').insert({user_id:user.id,product_id:item.product_id,order_item_id:item.order_item_id,description:details,customer_name:user.name,customer_email:user.email,customer_phone:user.phone,receipt_code:String(item.order_id)});
                 if(we)throw we;
-            } else {
+            }else{
                 const {error}=await sbClient.from('service_reservation').insert({user_id:user.id,service_type:type.toLowerCase().includes('consult')?'consultation':'repair',status:'requested',appointment_date:new Date().toISOString(),notes:details,device_details:device,customer_name:user.name,customer_email:user.email,customer_phone:user.phone});
                 if(error)throw error;
             }
@@ -1389,75 +1408,28 @@ pages.checkout = async () => {
     await Products.load();
     cart=cart.map(i=>{const p=Products.get(i.id);return p?{id:p.id,title:p.title,price:p.price,qty:Math.min(i.qty,p.stock)}:null;}).filter(i=>i&&i.qty>0);
     if(!cart.length)throw new Error('Your cart items are no longer available.');
-    const t=totals(cart), address=[user.address,user.city,user.zip].filter(Boolean).join(', ');
+    const t=totals(cart),address=[user.address,user.city,user.zip].filter(Boolean).join(', ');
     $('#summaryRows').innerHTML=cart.map(i=>`<div class="summary-row"><span>${esc(i.title)} (x${i.qty})</span><span>${money(i.price*i.qty)}</span></div>`).join('')+
       `<div class="summary-row"><span>Subtotal</span><span>${money(t.subtotal)}</span></div><div class="summary-row"><span>Tax</span><span>${money(t.tax)}</span></div><div class="summary-row"><span>Shipping</span><span>${money(t.shipping)}</span></div>`;
     $('#sumTotal').textContent=money(t.total);$('#shipTo').textContent='Ship to: '+address;
+    $('#checkoutForm').elements.payment.innerHTML='<option value="gcash" selected>GCash</option>';
     $('#checkoutForm').addEventListener('submit',async e=>{
         e.preventDefault();const btn=$('button[type="submit"]',e.target);btn.disabled=true;
         try{
-            const fd=new FormData(e.target), payment=fd.get('payment');
-
-const addressPayload = {
-    user_id: user.id,
-    street: user.address,
-    city: user.city,
-    postal_code: user.zip,
-    country: 'PH',
-    is_default: true
-};
-
-// Check if customer already has a default address
-const { data: existingAddress, error: findError } =
-    await sbClient
-        .from('address')
-        .select('address_id')
-        .eq('user_id', user.id)
-        .eq('is_default', true)
-        .maybeSingle();
-
-if (findError) throw findError;
-
-let addressId;
-
-if (existingAddress) {
-    // Update existing default address
-    const { data, error } = await sbClient
-        .from('address')
-        .update(addressPayload)
-        .eq('address_id', existingAddress.address_id)
-        .select('address_id')
-        .single();
-
-    if (error) throw error;
-    addressId = data.address_id;
-
-} else {
-    // Insert only when no default address exists
-    const { data, error } = await sbClient
-        .from('address')
-        .insert(addressPayload)
-        .select('address_id')
-        .single();
-
-    if (error) throw error;
-    addressId = data.address_id;
-
-// Create the order in Supabase
-const { data: orderId, error: oe } =
-    await sbClient.rpc('place_order_secure', {
-        p_address_id: addressId,
-        p_items: cart.map(i => ({
-            component_id: Number(i.id),
-            quantity: i.qty
-        })),
-        p_payment_method: payment,
-        p_customer_note: fd.get('note') || ''
-    });
-
-if (oe) throw oe;
-}
-            write(KEY.cart,[]);await syncCartToDatabase([]);toast('Order placed successfully.');location.href='myorders.html';
+            const fd=new FormData(e.target),addressPayload={user_id:user.id,street:user.address,city:user.city,postal_code:user.zip,country:'PH',is_default:true};
+            const {data:existing,error:findError}=await sbClient.from('address').select('address_id').eq('user_id',user.id).eq('is_default',true).maybeSingle();
+            if(findError)throw findError;
+            let addressId;
+            if(existing){
+                const {data,error}=await sbClient.from('address').update(addressPayload).eq('address_id',existing.address_id).select('address_id').single();
+                if(error)throw error;addressId=data.address_id;
+            }else{
+                const {data,error}=await sbClient.from('address').insert(addressPayload).select('address_id').single();
+                if(error)throw error;addressId=data.address_id;
+            }
+            const {data:orderId,error}=await sbClient.rpc('place_order_secure',{p_address_id:addressId,p_items:cart.map(i=>({component_id:Number(i.id),quantity:i.qty})),p_payment_method:'gcash',p_customer_note:fd.get('note')||''});
+            if(error)throw error;if(!orderId)throw new Error('The database did not return the new order number.');
+            write(KEY.cart,[]);await syncCartToDatabase([]);toast('Order placed and saved to your purchase history.');location.href='myorders.html';
         }catch(err){toast(err.message,'error');btn.disabled=false;}
     });
 };
@@ -1472,11 +1444,12 @@ pages.orders = async () => {
           <div class="order-header"><span>Order ID: <span class="order-id">#${o.id}</span></span><span class="status ${o.status}">${labels[o.status]||o.status}</span></div>
           ${(o.items||[]).map(i=>`<div class="order-item"><div class="item-info"><div class="item-name">${esc(i.title)}</div><div class="item-qty">Quantity: x${i.qty}</div></div><div class="item-price">${money(i.price*i.qty)}</div></div>`).join('')}
           <p class="hint">Scheduled delivery: <strong>${o.delivery_date||'Not yet scheduled'}</strong></p>
+          ${o.proof_image_url?`<p class="hint">Delivery proof: <a href="${esc(o.proof_image_url)}" target="_blank" rel="noopener">View photo</a></p>`:''}
           <div class="order-footer"><div class="order-total">Total Amount: <strong>${money(o.total)}</strong></div><div class="order-actions">${o.status==='toreceive'?'<button class="btn btn-primary" data-received>Order Received</button>':''}</div></div></div>`).join(''):'<div class="card empty-state"><p>No orders in this tab yet.</p></div>';
     };
     const {data,error}=await sbClient.from('orders').select('*,order_item(*),address(*)').eq('user_id',user.id).order('created_at',{ascending:false});
     if(error)throw error;
-    orders=(data||[]).map(o=>({id:o.order_id,status:String(o.order_status),total:Number(o.total_amount),delivery_date:o.delivery_date,items:(o.order_item||[]).map(i=>({title:i.item_name||'PC Component',qty:i.quantity,price:Number(i.unit_price)}))}));
+    orders=(data||[]).map(o=>({id:o.order_id,status:String(o.order_status),total:Number(o.total_amount),delivery_date:o.delivery_date,proof_image_url:o.proof_image_url||null,items:(o.order_item||[]).map(i=>({title:i.item_name||'PC Component',qty:i.quantity,price:Number(i.unit_price)}))}));
     render();
     $('#orderTabs').addEventListener('click',e=>{const b=e.target.closest('.tab-btn');if(!b)return;$$('.tab-btn').forEach(x=>x.classList.toggle('active',x===b));tab=b.dataset.tab;render();});
     list.addEventListener('click',async e=>{
@@ -1534,7 +1507,8 @@ pages.staff = async () => {
         const orders=data||[];
         tbody.innerHTML=orders.length?orders.map(o=>{
             const items=o.order_item||[], customer=o.users?.name||o.users?.email||'Customer';
-            return `<tr data-id="${o.order_id}"><td>#${o.order_id}<button class="btn btn-sm btn-soft" data-expand>Details</button></td><td>${esc(customer)}</td><td>${items.length} item(s)</td><td>${money(o.total_amount)}</td><td><span class="status">${esc(o.order_status)}</span></td><td><input type="date" class="edit-input date" data-date value="${o.delivery_date||''}"></td><td>${o.order_status==='pending'?'<button class="btn btn-sm btn-soft" data-ship>Mark To Ship</button>':'<button class="btn btn-sm btn-primary" data-ship>Update Status</button>'}</td></tr>
+            const action=o.order_status==='toreceive'?'<button class="btn btn-sm btn-ok" data-complete>Order Completed</button>':o.order_status==='completed'?'<span class="status">Completed</span>':'<button class="btn btn-sm btn-primary" data-ship>Update Status</button>';
+            return `<tr data-id="${o.order_id}"><td>#${o.order_id}<button class="btn btn-sm btn-soft" data-expand>Details</button></td><td>${esc(customer)}</td><td>${items.length} item(s)</td><td>${money(o.total_amount)}</td><td><span class="status">${esc(o.order_status)}</span></td><td><input type="date" class="edit-input date" data-date value="${o.delivery_date||''}"></td><td>${action}${o.proof_image_url?`<br><a href="${esc(o.proof_image_url)}" target="_blank" rel="noopener">View proof</a>`:''}</td></tr>
             <tr class="order-detail-row" data-detail-for="${o.order_id}" hidden><td colspan="7"><strong>Shipping address:</strong> ${esc([o.address?.street,o.address?.city,o.address?.postal_code,o.address?.country].filter(Boolean).join(', ')||'No address')}<br><strong>Items:</strong><ul>${items.map(i=>`<li>${esc(i.item_name||'Component')} × ${i.quantity} — ${money(i.unit_price)}</li>`).join('')}</ul><strong>Customer note:</strong> ${esc(o.customer_note||'None')}</td></tr>`;
         }).join(''):'<tr><td colspan="7" class="table-empty">No orders yet.</td></tr>';
         $('#mItems').textContent=Products.list.reduce((n,p)=>n+p.stock,0);
@@ -1575,17 +1549,34 @@ pages.staff = async () => {
         if(e.target.closest('[data-expand]')){const detail=$(`[data-detail-for="${row.dataset.id}"]`,tbody);detail.hidden=!detail.hidden;}
         if(e.target.closest('[data-ship]')){
             const date=$('[data-date]',row).value;
+            if(!date)return toast('Please set the delivery date first.','error');
             const current=row.querySelector('.status')?.textContent?.trim().toLowerCase();
             const next=current==='pending'?'toship':current==='toship'?'toreceive':null;
-            if(!next)return toast('This order is already shipped or completed; no further shipping transition is available here.','error');
-            const {error}=await sbClient.from('orders').update({
-                order_status:next,
-                delivery_date:date||null,
-                shipped_at:next==='toreceive'?new Date().toISOString():null
-            }).eq('order_id',row.dataset.id);
+            if(!next)return toast('This order cannot be moved to the next shipping stage.','error');
+            const {error}=await sbClient.from('orders').update({order_status:next,delivery_date:date,shipped_at:next==='toreceive'?new Date().toISOString():null}).eq('order_id',row.dataset.id);
             if(error)return toast(error.message,'error');
             await load();toast(next==='toship'?'Order accepted for fulfillment.':'Order marked as shipped.');
         }
+    });
+    let completingOrderId=null;
+    const proofInput=$('#proofInput');
+    tbody.addEventListener('click',e=>{
+        const btn=e.target.closest('[data-complete]');if(!btn)return;
+        completingOrderId=btn.closest('tr').dataset.id;proofInput.click();
+    });
+    proofInput.addEventListener('change',async()=>{
+        const file=proofInput.files?.[0];if(!file||!completingOrderId)return;
+        if(!file.type.startsWith('image/'))return toast('Please select an image file.','error');
+        try{
+            const ext=(file.name.split('.').pop()||'jpg').replace(/[^a-z0-9]/gi,'').toLowerCase()||'jpg';
+            const path=`delivery-proof/${completingOrderId}-${Date.now()}.${ext}`;
+            const {error:uploadError}=await sbClient.storage.from(IMAGE_BUCKET).upload(path,file,{contentType:file.type,upsert:false});
+            if(uploadError)throw uploadError;
+            const {data:{publicUrl}}=sbClient.storage.from(IMAGE_BUCKET).getPublicUrl(path);
+            const {error}=await sbClient.from('orders').update({order_status:'completed',proof_image_url:publicUrl,received_at:new Date().toISOString()}).eq('order_id',completingOrderId);
+            if(error)throw error;
+            completingOrderId=null;proofInput.value='';await load();toast('Order completed and delivery proof saved.');
+        }catch(err){toast(err.message||'Could not save delivery proof.','error');}
     });
     tbody.addEventListener('change',async e=>{
         if(!e.target.matches('[data-date]'))return;
@@ -1623,33 +1614,18 @@ function makeDashboardTablesCollapsible(root, labels) {
 
 pages.admin = async () => {
     const admin=guard(['admin']);if(!admin)return;
-    const usersBody=$('#usersBody'),servicesBody=$('#servicesBody');
+    const usersBody=$('#usersBody');
     const loadUsers=async()=>{
         const {data,error}=await sbClient.from('users').select('user_id,username,email,role,user_role,is_active,name').order('created_at',{ascending:false});
         if(error)throw error;
         usersBody.innerHTML=(data||[]).map(u=>`<tr data-id="${u.user_id}"><td>${u.user_id.slice(0,8)}</td><td>${esc(u.name||u.username)}</td><td>${esc(u.email)}</td><td><select class="edit-input" data-role ${u.user_id===admin.id?'disabled':''}>${['admin','staff','customer'].map(r=>`<option value="${r}" ${(u.role||u.user_role)===r?'selected':''}>${r}</option>`).join('')}</select></td><td>${u.is_active?'Active':'Suspended'}</td><td>${u.user_id===admin.id?'You':`<button class="btn btn-sm btn-soft" data-toggle>${u.is_active?'Suspend':'Reactivate'}</button>`}</td></tr>`).join('');
         $('#mAccounts').textContent=(data||[]).length;
     };
-    const loadTickets=async()=>{
-        const [{data:w,error:we},{data:s,error:se}]=await Promise.all([
-            sbClient.from('warranty_request').select('*,users(name,email),component(name)').order('created_at',{ascending:false}),
-            sbClient.from('service_reservation').select('*,users(name,email)').order('created_at',{ascending:false})
-        ]);
-        if(we)throw we;if(se)throw se;
-        const rows=[...(w||[]).map(x=>({id:x.warranty_id,kind:'Warranty',customer:x.customer_name||x.users?.name||x.users?.email,device:x.component?.name||x.product_id,details:x.description,contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),date:x.created_at,receipt:x.receipt_code,status:x.status,table:'warranty_request',key:'warranty_id'})),
-          ...(s||[]).map(x=>({id:x.reservation_id,kind:'Service',customer:x.customer_name||x.users?.name||x.users?.email,device:x.device_details||x.service_type,details:x.notes,contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),date:x.appointment_date,status:x.status,table:'service_reservation',key:'reservation_id'}))];
-        servicesBody.innerHTML=rows.map(x=>`<tr data-table="${x.table}" data-key="${x.key}" data-id="${x.id}"><td>#${x.id}</td><td>${esc(x.customer||'Customer')}</td><td>${esc(x.device||'')}</td><td>${x.kind}</td><td>${esc(x.status)}</td><td><details><summary>Details</summary>${esc(x.details||'No details')}<br>Contact: ${esc(x.contact||'Not provided')}<br>Date: ${esc(x.date||'Not provided')}${x.receipt?'<br>Receipt / order: '+esc(x.receipt):''}</details><select data-ticket-status class="edit-input"><option>${esc(x.status)}</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="in_progress">In progress</option><option value="resolved">Resolved</option></select></td></tr>`).join('')||'<tr><td colspan="6">No requests yet.</td></tr>';
-        $('#mServices').textContent=rows.filter(x=>!['resolved','rejected'].includes(String(x.status))).length;
-    };
     // Inventory is a first-class admin feature and must not depend on user/ticket queries.
     setupInventory($('#inventoryBody'),{canDelete:true,addButton:$('#addProductBtn')});
     loadUsers().catch(err=>{
         console.error('Admin users:',err);
         usersBody.innerHTML=`<tr><td colspan="6" class="table-empty">${esc(err.message||'Unable to load user accounts.')}</td></tr>`;
-    });
-    loadTickets().catch(err=>{
-        console.error('Admin service requests:',err);
-        servicesBody.innerHTML=`<tr><td colspan="6" class="table-empty">${esc(err.message||'Unable to load service requests.')}</td></tr>`;
     });
     usersBody.addEventListener('change',async e=>{
         if(!e.target.matches('[data-role]'))return;
@@ -1663,13 +1639,6 @@ pages.admin = async () => {
         const active=row.children[4].textContent.trim()!=='Active';
         const {error}=await sbClient.from('users').update({is_active:active}).eq('user_id',id);
         if(error)return toast(error.message,'error');await loadUsers();toast('Account status updated.');
-    });
-    servicesBody.addEventListener('change',async e=>{
-        if(!e.target.matches('[data-ticket-status]'))return;
-        const row=e.target.closest('tr'),table=row.dataset.table,key=row.dataset.key;
-        const status=e.target.value;
-        const {error}=await sbClient.from(table).update({status}).eq(key,row.dataset.id);
-        if(error)return toast(error.message,'error');toast('Request status updated.');
     });
     $('#addUserBtn').addEventListener('click',async()=>{
         const name=(prompt('Full name for the new account:')||'').trim();
@@ -1697,7 +1666,7 @@ pages.admin = async () => {
         console.error('Admin order metrics:',err);
         $('#mOrders').textContent='—';$('#mRevenue').textContent='—';
     });
-    makeDashboardTablesCollapsible(document,[['main .card:nth-of-type(1)','Product inventory'],['main .card:nth-of-type(2)','User accounts'],['main .card:nth-of-type(3)','Service and warranty requests']]);
+    makeDashboardTablesCollapsible(document,[['main .card:nth-of-type(1)','Product inventory'],['main .card:nth-of-type(2)','User accounts']]);
 };
 
 /* End Supabase integration overrides */
