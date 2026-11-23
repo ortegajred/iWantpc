@@ -1542,7 +1542,9 @@ pages.staff = async () => {
         const {count}=await sbClient.from('service_reservation').select('*',{count:'exact',head:true});$('#mBookings').textContent=count||0;
         $('#mReports').textContent='—';
     };
-    await Products.load();await load();
+    // Initialize inventory independently: an order/ticket query must never prevent
+    // staff from viewing or managing components.
+    setupInventory($('#inventoryBody'),{addButton:$('#addProductBtn')});
     const ticketsBody=$('#staffTicketsBody');
     const loadStaffTickets=async()=>{
         const [{data:w,error:we},{data:s,error:se}]=await Promise.all([
@@ -1554,7 +1556,15 @@ pages.staff = async () => {
           ...(s||[]).map(x=>({id:x.reservation_id,table:'service_reservation',key:'reservation_id',customer:x.customer_name||x.users?.name||x.users?.email,device:x.device_details||x.service_type,type:'Service',details:x.notes,contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),date:x.appointment_date,status:x.status}))];
         ticketsBody.innerHTML=rows.map(x=>`<tr data-table="${x.table}" data-key="${x.key}" data-id="${x.id}"><td>#${x.id}</td><td>${esc(x.customer||'Customer')}</td><td>${esc(x.device||'')}</td><td>${x.type}</td><td><details><summary>View details</summary>${esc(x.details||'No details')}<br>Contact: ${esc(x.contact||'Not provided')}<br>Date: ${esc(x.date||'Not provided')}${x.receipt?'<br>Receipt / order: '+esc(x.receipt):''}</details></td><td>${esc(x.status)}</td><td><select class="edit-input" data-ticket-status><option value="${esc(x.status)}">${esc(x.status)}</option><option value="in_progress">In progress</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="resolved">Resolved</option></select></td></tr>`).join('')||'<tr><td colspan="7" class="table-empty">No service or warranty requests.</td></tr>';
     };
-    await loadStaffTickets();
+    // Keep the order queue and service queue independent from inventory.
+    load().catch(err=>{
+        console.error('Staff order queue:',err);
+        tbody.innerHTML=`<tr><td colspan="7" class="table-empty">${esc(err.message||'Unable to load orders.')}</td></tr>`;
+    });
+    loadStaffTickets().catch(err=>{
+        console.error('Staff service queue:',err);
+        ticketsBody.innerHTML=`<tr><td colspan="7" class="table-empty">${esc(err.message||'Unable to load service requests.')}</td></tr>`;
+    });
     ticketsBody.addEventListener('change',async e=>{
         if(!e.target.matches('[data-ticket-status]'))return;
         const row=e.target.closest('tr'),{error}=await sbClient.from(row.dataset.table).update({status:e.target.value}).eq(row.dataset.key,row.dataset.id);
@@ -1565,9 +1575,16 @@ pages.staff = async () => {
         if(e.target.closest('[data-expand]')){const detail=$(`[data-detail-for="${row.dataset.id}"]`,tbody);detail.hidden=!detail.hidden;}
         if(e.target.closest('[data-ship]')){
             const date=$('[data-date]',row).value;
-            const next=row.querySelector('.status')?.textContent==='pending'?'toship':'toreceive';
-            const {error}=await sbClient.from('orders').update({order_status:next,delivery_date:date||null,shipped_at:next==='toreceive'?new Date().toISOString():null}).eq('order_id',row.dataset.id);
-            if(error)return toast(error.message,'error');await load();toast('Order and delivery schedule updated.');
+            const current=row.querySelector('.status')?.textContent?.trim().toLowerCase();
+            const next=current==='pending'?'toship':current==='toship'?'toreceive':null;
+            if(!next)return toast('This order is already shipped or completed; no further shipping transition is available here.','error');
+            const {error}=await sbClient.from('orders').update({
+                order_status:next,
+                delivery_date:date||null,
+                shipped_at:next==='toreceive'?new Date().toISOString():null
+            }).eq('order_id',row.dataset.id);
+            if(error)return toast(error.message,'error');
+            await load();toast(next==='toship'?'Order accepted for fulfillment.':'Order marked as shipped.');
         }
     });
     tbody.addEventListener('change',async e=>{
@@ -1575,8 +1592,21 @@ pages.staff = async () => {
         const {error}=await sbClient.from('orders').update({delivery_date:e.target.value||null}).eq('order_id',e.target.closest('tr').dataset.id);
         if(error)return toast(error.message,'error');toast('Delivery date saved.');
     });
-    $('#reportBtn').addEventListener('click',()=>toast('Use the database sales and order views for the current report.'));
-    setupInventory($('#inventoryBody'),{addButton:$('#addProductBtn')});
+    $('#reportBtn').addEventListener('click',async()=>{
+        try {
+            const {data,error}=await sbClient.from('orders')
+                .select('order_id,created_at,order_status,total_amount,delivery_date,user_id')
+                .order('created_at',{ascending:false});
+            if(error)throw error;
+            const rows=[['Order ID','Created At','Status','Total Amount','Delivery Date','Customer ID'],
+                ...(data||[]).map(o=>[o.order_id,o.created_at,o.order_status,o.total_amount,o.delivery_date||'',o.user_id])];
+            const csv=rows.map(r=>r.map(v=>`"${String(v??'').replace(/"/g,'""')}"`).join(',')).join('\\r\\n');
+            const url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8;'}));
+            const a=document.createElement('a');a.href=url;a.download=`iwantpc-orders-${new Date().toISOString().slice(0,10)}.csv`;
+            document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);
+            toast('Order report downloaded.');
+        } catch(err) { toast(err.message||'Could not generate report.','error'); }
+    });
     makeDashboardTablesCollapsible(document,[['main .card:nth-of-type(1)','Order fulfillment records'],['main .card:nth-of-type(2)','Product inventory'],['main .card:nth-of-type(3)','Service and warranty requests']]);
 };
 
@@ -1611,7 +1641,16 @@ pages.admin = async () => {
         servicesBody.innerHTML=rows.map(x=>`<tr data-table="${x.table}" data-key="${x.key}" data-id="${x.id}"><td>#${x.id}</td><td>${esc(x.customer||'Customer')}</td><td>${esc(x.device||'')}</td><td>${x.kind}</td><td>${esc(x.status)}</td><td><details><summary>Details</summary>${esc(x.details||'No details')}<br>Contact: ${esc(x.contact||'Not provided')}<br>Date: ${esc(x.date||'Not provided')}${x.receipt?'<br>Receipt / order: '+esc(x.receipt):''}</details><select data-ticket-status class="edit-input"><option>${esc(x.status)}</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="in_progress">In progress</option><option value="resolved">Resolved</option></select></td></tr>`).join('')||'<tr><td colspan="6">No requests yet.</td></tr>';
         $('#mServices').textContent=rows.filter(x=>!['resolved','rejected'].includes(String(x.status))).length;
     };
-    await Promise.all([Products.load(),loadUsers(),loadTickets()]);
+    // Inventory is a first-class admin feature and must not depend on user/ticket queries.
+    setupInventory($('#inventoryBody'),{canDelete:true,addButton:$('#addProductBtn')});
+    loadUsers().catch(err=>{
+        console.error('Admin users:',err);
+        usersBody.innerHTML=`<tr><td colspan="6" class="table-empty">${esc(err.message||'Unable to load user accounts.')}</td></tr>`;
+    });
+    loadTickets().catch(err=>{
+        console.error('Admin service requests:',err);
+        servicesBody.innerHTML=`<tr><td colspan="6" class="table-empty">${esc(err.message||'Unable to load service requests.')}</td></tr>`;
+    });
     usersBody.addEventListener('change',async e=>{
         if(!e.target.matches('[data-role]'))return;
         const id=e.target.closest('tr').dataset.id,role=e.target.value;
@@ -1632,13 +1671,32 @@ pages.admin = async () => {
         const {error}=await sbClient.from(table).update({status}).eq(key,row.dataset.id);
         if(error)return toast(error.message,'error');toast('Request status updated.');
     });
-    $('#addUserBtn').addEventListener('click',()=>toast('Create staff/admin accounts through Supabase Auth invitation or approved signup workflow. Do not create passwords in the client.'));
-    const {data:metricOrders,error:mo}=await sbClient.from('orders').select('total_amount,order_status');
-    if(!mo){
-        $('#mOrders').textContent=metricOrders.length;
-        $('#mRevenue').textContent=money(metricOrders.filter(o=>o.order_status!=='pending').reduce((n,o)=>n+Number(o.total_amount),0));
-    }
-    setupInventory($('#inventoryBody'),{canDelete:true,addButton:$('#addProductBtn')});
+    $('#addUserBtn').addEventListener('click',async()=>{
+        const name=(prompt('Full name for the new account:')||'').trim();
+        if(!name)return;
+        const email=(prompt('Email address for the invitation:')||'').trim().toLowerCase();
+        if(!email)return;
+        if(!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email))return toast('Enter a valid email address.','error');
+        const role=(prompt('Assign role: admin, staff, or customer','staff')||'').trim().toLowerCase();
+        if(!['admin','staff','customer'].includes(role))return toast('Role must be admin, staff, or customer.','error');
+        try{
+            const {data,error}=await sbClient.functions.invoke('admin-invite-user',{body:{name,email,role}});
+            if(error)throw error;
+            await loadUsers();
+            toast(data?.message||`Invitation sent to ${email}.`);
+        }catch(err){
+            console.error('Admin invite:',err);
+            toast(err.message||'Could not send the account invitation.','error');
+        }
+    });
+    sbClient.from('orders').select('total_amount,order_status').then(({data,error})=>{
+        if(error)throw error;
+        $('#mOrders').textContent=(data||[]).length;
+        $('#mRevenue').textContent=money((data||[]).filter(o=>!['pending','cancelled'].includes(String(o.order_status))).reduce((n,o)=>n+Number(o.total_amount||0),0));
+    }).catch(err=>{
+        console.error('Admin order metrics:',err);
+        $('#mOrders').textContent='—';$('#mRevenue').textContent='—';
+    });
     makeDashboardTablesCollapsible(document,[['main .card:nth-of-type(1)','Product inventory'],['main .card:nth-of-type(2)','User accounts'],['main .card:nth-of-type(3)','Service and warranty requests']]);
 };
 
