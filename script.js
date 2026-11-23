@@ -1456,7 +1456,7 @@ const { data: orderId, error: oe } =
     });
 
 if (oe) throw oe;
-
+}
             write(KEY.cart,[]);await syncCartToDatabase([]);toast('Order placed successfully.');location.href='myorders.html';
         }catch(err){toast(err.message,'error');btn.disabled=false;}
     });
