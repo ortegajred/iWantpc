@@ -370,3 +370,16 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.65); backdrop-filter: blur(
 @media (max-width: 900px) { .builder-layout { grid-template-columns: 1fr; } .summary-card { position: static; } }
 
 [hidden] { display: none !important; }
+
+
+/* Supabase dashboard accordion enhancement */
+.dashboard-table-collapse { margin-top: 10px; }
+.dashboard-table-collapse > summary {
+    cursor: pointer; color: var(--soft); font-size: 13px; font-weight: 600;
+    padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px;
+    background: rgba(255,255,255,.04); list-style-position: inside;
+}
+.dashboard-table-collapse[open] > summary { margin-bottom: 12px; }
+.order-detail-row td { background: rgba(255,255,255,.035); color: var(--soft); line-height: 1.8; padding: 14px; }
+.order-detail-row ul { margin: 6px 0 6px 22px; }
+.sold-count { margin: 7px 0 0; }
