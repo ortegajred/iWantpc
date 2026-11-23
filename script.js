@@ -330,7 +330,12 @@ function formMessage(text, ok = false) {
 
 /* ===== Cart ===== */
 const getCart = () => read(KEY.cart, []);
-const saveCart = cart => write(KEY.cart, cart);
+const saveCart = cart => {
+    write(KEY.cart, cart);
+    if (typeof AUTH_USER !== 'undefined' && AUTH_USER) {
+        syncCartToDatabase(cart).catch(err => console.warn('Cart sync failed:', err.message));
+    }
+};
 function addToCart(id, qty = 1) {
     const product = Products.get(id);
     const cart = getCart(), line = cart.find(i => sameId(i.id, id));
@@ -792,7 +797,8 @@ pages['pc-builder'] = async () => {
         $('#assemblyToggle').addEventListener('change', refresh);
         $('#resetBuildBtn').addEventListener('click', () => { ids = {}; refresh(); toast('Build cleared.'); });
 
-        $('#addBuildBtn').addEventListener('click', () => {
+        $('#addBuildBtn').addEventListener('click', async () => {
+            if (!(await requireCompleteProfile())) return;
             const { chosen, checks } = refresh();
             if (!chosen.length) return toast('Select at least one component first.', 'error');
             if (checks.some(c => c.level === 'error')) return toast('Fix the compatibility errors before adding this build to your cart.', 'error');
@@ -809,7 +815,8 @@ pages['pc-builder'] = async () => {
             toast('Build added to your cart.');
         });
 
-        $('#bookConsultBtn').addEventListener('click', () => {
+        $('#bookConsultBtn').addEventListener('click', async () => {
+            if (!(await requireCompleteProfile())) return;
             const { chosen } = refresh();
             write(KEY.prefill, {
                 type: 'PC Build Consultation',
@@ -1131,14 +1138,483 @@ pages.admin = () => {
     renderServices();
 };
 
+
+/* ================= SUPABASE AUTH + COMPONENT-CENTRIC DATA LAYER =================
+   The existing page markup and styling remain the presentation layer. The database
+   is authoritative; localStorage is only a short-lived UI cache for the cart/build. */
+const sbClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
+    auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
+});
+let AUTH_USER = null;
+let AUTH_PROFILE = null;
+
+function currentUser() { return AUTH_USER; }
+function guard(roles) {
+    const user = AUTH_USER;
+    if (!user || (roles && !roles.includes(user.role))) {
+        location.replace(user ? homeFor(user.role) : 'login.html');
+        return null;
+    }
+    return user;
+}
+async function loadAuthUser() {
+    const { data: { session }, error } = await sbClient.auth.getSession();
+    if (error) throw error;
+    if (!session) { AUTH_USER = null; return null; }
+    const id = session.user.id;
+    const [{ data: u, error: ue }, { data: p, error: pe }] = await Promise.all([
+        sbClient.from('users').select('user_id,username,email,user_role,role,is_active,name').eq('user_id', id).maybeSingle(),
+        sbClient.from('profiles').select('id,email,name,username,role,active,phone,address,city,zip').eq('id', id).maybeSingle()
+    ]);
+    if (ue) throw ue;
+    if (pe && pe.code !== 'PGRST116') throw pe;
+    if (!u || u.is_active === false || (p && p.active === false)) {
+        await sbClient.auth.signOut();
+        AUTH_USER = null;
+        throw new Error('This account is inactive. Please contact an administrator.');
+    }
+    AUTH_PROFILE = p || {};
+    AUTH_USER = {
+        id, user_id: id, email: session.user.email || u.email,
+        username: p?.username || u.username || '',
+        name: p?.name || u.name || '',
+        role: u.role || u.user_role || p?.role || 'customer',
+        active: u.is_active !== false && p?.active !== false,
+        phone: p?.phone || '', address: p?.address || '', city: p?.city || '', zip: p?.zip || ''
+    };
+    return AUTH_USER;
+}
+
+const componentToProduct = r => ({
+    ...r, id: r.component_id, title: r.name, stock: Number(r.stock_level) || 0,
+    price: Number(r.price) || 0, image: r.image_url || '', description: r.description || '',
+    specs: { ...(r.specs || {}), socket: r.socket || r.specs?.socket,
+        memory_type: r.ram_type || r.specs?.memory_type,
+        wattage: r.psu_watts || r.specs?.wattage, min_psu_watts: r.min_psu_watts || r.specs?.min_psu_watts }
+});
+Object.assign(Products, {
+    async load() {
+        const { data, error } = await sbClient.from('component').select('*').eq('is_active', true).order('category').order('name');
+        if (error) throw error;
+        this.list = (data || []).map(componentToProduct).sort(byCatTitle);
+        return this.list;
+    },
+    async create(data) {
+        const specs = data.specs || {};
+        const payload = {
+            name: data.title, sku: ('IWP-' + data.title).toUpperCase().replace(/[^A-Z0-9]+/g, '-').slice(0, 48) + '-' + Date.now().toString().slice(-5),
+            category: data.category, description: data.description || '', price: data.price, stock_level: data.stock,
+            image_url: data.image, specs, socket: specs.socket || null,
+            ram_type: specs.memory_type && ['DDR4','DDR5'].includes(specs.memory_type) ? specs.memory_type : null,
+            psu_watts: specs.wattage || null, min_psu_watts: specs.min_psu_watts || null
+        };
+        const { data: row, error } = await sbClient.from('component').insert(payload).select('*').single();
+        if (error) throw error;
+        const p = componentToProduct(row); this.list.push(p); this.list.sort(byCatTitle); return p;
+    },
+    async update(id, changes) {
+        const payload = {};
+        if ('title' in changes) payload.name = changes.title;
+        if ('description' in changes) payload.description = changes.description;
+        if ('price' in changes) payload.price = changes.price;
+        if ('stock' in changes) payload.stock_level = changes.stock;
+        if ('image' in changes) payload.image_url = changes.image;
+        if ('category' in changes) payload.category = changes.category;
+        if ('specs' in changes) {
+            payload.specs = changes.specs;
+            payload.socket = changes.specs.socket || null;
+            payload.ram_type = ['DDR4','DDR5'].includes(changes.specs.memory_type) ? changes.specs.memory_type : null;
+            payload.psu_watts = changes.specs.wattage || null;
+            payload.min_psu_watts = changes.specs.min_psu_watts || null;
+        }
+        const { data: row, error } = await sbClient.from('component').update(payload).eq('component_id', id).select('*').single();
+        if (error) throw error;
+        const fresh = componentToProduct(row), ix = this.list.findIndex(x => sameId(x.id,id));
+        if (ix >= 0) this.list[ix] = fresh; else this.list.push(fresh);
+        this.list.sort(byCatTitle); return fresh;
+    },
+    async remove(id) {
+        const { error } = await sbClient.from('component').update({ is_active: false }).eq('component_id', id);
+        if (error) throw error;
+        this.list = this.list.filter(p => !sameId(p.id,id));
+    },
+    async adjustStock(lines, direction) {
+        const items = lines.filter(i => !i.service && i.id != null).map(i => ({ id: i.id, qty: i.qty }));
+        if (items.length) {
+            const { error } = await sbClient.rpc('adjust_stock_bulk', { items, direction });
+            if (error) throw error;
+            await this.load();
+        }
+    }
+});
+
+async function fetchProfileAndAddress(userId) {
+    const [{ data: p, error: pe }, { data: a, error: ae }] = await Promise.all([
+        sbClient.from('profiles').select('*').eq('id', userId).maybeSingle(),
+        sbClient.from('address').select('*').eq('user_id', userId).eq('is_default', true).maybeSingle()
+    ]);
+    if (pe) throw pe; if (ae && ae.code !== 'PGRST116') throw ae;
+    if (p) Object.assign(AUTH_USER, { name:p.name, username:p.username, phone:p.phone, address:p.address, city:p.city, zip:p.zip });
+    if (a) Object.assign(AUTH_USER, { address:a.street, city:a.city, zip:a.postal_code, address_id:a.address_id });
+    return AUTH_USER;
+}
+async function requireCompleteProfile(user = AUTH_USER) {
+    if (!user) { location.href='login.html'; return false; }
+    await fetchProfileAndAddress(user.id);
+    const missing = ['name','phone','address','city','zip'].filter(k => !String(user[k] || '').trim());
+    if (missing.length) {
+        toast('Please complete your name, contact number, and shipping address before continuing.', 'error');
+        location.href = 'accountsetting.html';
+        return false;
+    }
+    return true;
+}
+
+/* Persist cart rows in the user's Supabase cart; localStorage is only the render cache. */
+async function syncCartToDatabase(cart) {
+    const { data: c, error: ce } = await sbClient.from('cart').upsert({ user_id: AUTH_USER.id }, { onConflict:'user_id' }).select('cart_id').single();
+    if (ce) throw ce;
+    const { error: de } = await sbClient.from('cart_item').delete().eq('cart_id', c.cart_id);
+    if (de) throw de;
+    const rows = cart.filter(i => !i.service && i.id != null).map(i => ({ cart_id:c.cart_id, component_id:Number(i.id), quantity:i.qty }));
+    if (rows.length) { const { error } = await sbClient.from('cart_item').insert(rows); if (error) throw error; }
+}
+async function loadCartFromDatabase() {
+    if (!AUTH_USER) return [];
+    const { data: c, error: ce } = await sbClient.from('cart').select('cart_id').eq('user_id', AUTH_USER.id).maybeSingle();
+    if (ce) throw ce;
+    if (!c) { write(KEY.cart, []); return []; }
+    const { data: rows, error } = await sbClient.from('cart_item').select('cart_item_id,component_id,quantity').eq('cart_id', c.cart_id);
+    if (error) throw error;
+    await Products.load();
+    const cart = (rows || []).map(r => {
+        const p = Products.get(r.component_id);
+        return p ? { id:p.id,title:p.title,price:p.price,qty:r.quantity } : null;
+    }).filter(Boolean);
+    write(KEY.cart, cart); return cart;
+}
+
+pages.login = () => {
+    if (AUTH_USER) { location.replace(homeFor(AUTH_USER.role)); return; }
+    $('#loginForm').addEventListener('submit', async e => {
+        e.preventDefault(); const btn = $('button[type="submit"]',e.target);
+        btn.disabled=true; formMessage('Signing in...');
+        try {
+            const { error } = await sbClient.auth.signInWithPassword({
+                email:$('#email').value.trim().toLowerCase(), password:$('#password').value
+            });
+            if (error) throw error;
+            await loadAuthUser();
+            if (!AUTH_USER) throw new Error('Your account profile is not ready. Contact support.');
+            location.replace(homeFor(AUTH_USER.role));
+        } catch(err) { formMessage(err.message || 'Unable to sign in.'); btn.disabled=false; }
+    });
+};
+pages.signup = () => {
+    $('#signupForm').addEventListener('submit', async e => {
+        e.preventDefault();
+        const password=$('#password').value, name=$('#fullname').value.trim(), email=$('#email').value.trim().toLowerCase();
+        if (password.length<8) return formMessage('Use a password with at least 8 characters.');
+        if (password!==$('#confirm-password').value) return formMessage('Passwords do not match.');
+        const btn=$('button[type="submit"]',e.target); btn.disabled=true;
+        try {
+            const username=email.split('@')[0].replace(/[^a-z0-9_]/gi,'').slice(0,30) || 'customer';
+            const { data, error } = await sbClient.auth.signUp({ email,password,options:{data:{name,username}} });
+            if (error) throw error;
+            if (!data.session) {
+                formMessage('Account created. Check your email to confirm your account, then sign in.',true);
+                return;
+            }
+            await loadAuthUser();
+            location.replace('accountsetting.html');
+        } catch(err) { formMessage(err.message); btn.disabled=false; }
+    });
+};
+
+pages.home = async () => {
+    const user=guard(); if(!user) return;
+    const shell=initShell(user), grid=$('#productGrid'), search=$('#searchInput');
+    let category='all', sales={};
+    const render=()=>{
+        const q=search.value.trim().toLowerCase();
+        const list=Products.list.filter(p=>(category==='all'||p.category===category)&&`${p.title} ${p.description} ${Object.values(p.specs).join(' ')}`.toLowerCase().includes(q));
+        grid.innerHTML=list.length?list.map(p=>`<article class="product-card" data-id="${esc(p.id)}">
+          <div class="product-image"><img src="${productImg(p)}" alt="${esc(p.title)}" loading="lazy"></div>
+          <div class="product-info"><h3 class="product-title">${esc(p.title)}</h3><div class="chips">${specChips(p,3)}</div><p class="product-description">${esc(p.description)}</p></div>
+          <div class="product-bottom"><div class="product-meta"><span class="product-price">${money(p.price)}</span><span class="stock${p.stock<=5?' low':''}">${p.stock>0?p.stock+' in stock':'Out of stock'}</span></div>
+          <p class="hint sold-count">${Number(sales[p.id]||0)} units ordered</p>
+          <div class="card-actions"><button class="btn btn-soft" data-add ${p.stock<1?'disabled':''}><i class="fa-solid fa-cart-plus"></i> Add</button><button class="btn btn-ok" data-buy ${p.stock<1?'disabled':''}>Buy Now</button></div></div></article>`).join(''):'<div class="empty-state"><p>No products found matching your search.</p></div>';
+    };
+    await Products.load();
+    const {data:salesRows,error:se}=await sbClient.from('v_component_sales').select('component_id,units_ordered');
+    if(!se) (salesRows||[]).forEach(x=>sales[x.component_id]=x.units_ordered);
+    await loadCartFromDatabase(); shell.renderCart(); render();
+    search.addEventListener('input',render);
+    $('#categoryPills').addEventListener('click',e=>{const p=e.target.closest('.pill');if(!p)return;$$('.pill').forEach(x=>x.classList.toggle('active',x===p));category=p.dataset.category;render();});
+    grid.addEventListener('click',async e=>{
+        const card=e.target.closest('.product-card');if(!card)return;
+        if(!(await requireCompleteProfile()))return;
+        const p=Products.get(card.dataset.id); if(!p)return;
+        if(e.target.closest('[data-add]')||e.target.closest('[data-buy]')){
+            const result=addToCart(p.id); if(result){await syncCartToDatabase(getCart());shell.renderCart();if(e.target.closest('[data-buy]'))shell.toggleCart(true);toast('Added '+esc(p.title)+' to cart.');}
+        }
+    });
+    $$('[data-prefill]').forEach(b=>b.addEventListener('click',()=>$('#bookingType').value=b.dataset.prefill));
+    $('#bookingForm').addEventListener('submit',async e=>{
+        e.preventDefault(); if(!(await requireCompleteProfile()))return;
+        const type=$('#bookingType').value, device=$('#bookingDevice').value.trim(), details=$('#bookingDetails').value.trim();
+        try {
+            if(type.toLowerCase().includes('warranty')){
+                const {data:orders,error}=await sbClient.from('orders').select('order_id,order_status,order_item(order_item_id,product_id,item_name,quantity)').eq('user_id',user.id).eq('order_status','completed');
+                if(error)throw error;
+                const matches=(orders||[]).flatMap(o=>(o.order_item||[]).map(i=>({...i,order_id:o.order_id}))).filter(i=>(i.item_name||'').toLowerCase()===device.toLowerCase()||String(i.product_id)===device);
+                if(!matches.length)throw new Error('Warranty claims are accepted only for items in your completed purchases. Enter the exact purchased product name or product ID.');
+                const item=matches[0];
+                const {error:we}=await sbClient.from('warranty_request').insert({user_id:user.id,product_id:item.product_id,order_item_id:item.order_item_id,description:details,customer_name:user.name,customer_email:user.email,customer_phone:user.phone,receipt_code:String(item.order_id)});
+                if(we)throw we;
+            } else {
+                const {error}=await sbClient.from('service_reservation').insert({user_id:user.id,service_type:type.toLowerCase().includes('consult')?'consultation':'repair',status:'requested',appointment_date:new Date().toISOString(),notes:details,device_details:device,customer_name:user.name,customer_email:user.email,customer_phone:user.phone});
+                if(error)throw error;
+            }
+            e.target.reset();toast('Request submitted successfully.');
+        }catch(err){toast(err.message,'error');}
+    });
+};
+
+pages.checkout = async () => {
+    const user=guard();if(!user)return;
+    if(!(await requireCompleteProfile()))return;
+    const body=$('#checkoutBody');let cart=await loadCartFromDatabase();
+    if(!cart.length){body.innerHTML='<div class="card empty-state"><p>Your cart is empty.</p><a href="home.html" class="btn btn-primary">Browse products</a></div>';return;}
+    await Products.load();
+    cart=cart.map(i=>{const p=Products.get(i.id);return p?{id:p.id,title:p.title,price:p.price,qty:Math.min(i.qty,p.stock)}:null;}).filter(i=>i&&i.qty>0);
+    if(!cart.length)throw new Error('Your cart items are no longer available.');
+    const t=totals(cart), address=[user.address,user.city,user.zip].filter(Boolean).join(', ');
+    $('#summaryRows').innerHTML=cart.map(i=>`<div class="summary-row"><span>${esc(i.title)} (x${i.qty})</span><span>${money(i.price*i.qty)}</span></div>`).join('')+
+      `<div class="summary-row"><span>Subtotal</span><span>${money(t.subtotal)}</span></div><div class="summary-row"><span>Tax</span><span>${money(t.tax)}</span></div><div class="summary-row"><span>Shipping</span><span>${money(t.shipping)}</span></div>`;
+    $('#sumTotal').textContent=money(t.total);$('#shipTo').textContent='Ship to: '+address;
+    $('#checkoutForm').addEventListener('submit',async e=>{
+        e.preventDefault();const btn=$('button[type="submit"]',e.target);btn.disabled=true;
+        try{
+            const fd=new FormData(e.target), payment=fd.get('payment');
+            const {data:addr,error:ae}=await sbClient.from('address').insert({user_id:user.id,street:user.address,city:user.city,postal_code:user.zip,country:'PH',is_default:true}).select('address_id').single();
+            if(ae)throw ae;
+            const {data:orderId,error:oe}=await sbClient.rpc('place_order_secure',{
+                p_address_id:addr.address_id,
+                p_items:cart.map(i=>({component_id:Number(i.id),quantity:i.qty})),
+                p_payment_method:payment,
+                p_customer_note:fd.get('note')||''
+            });
+            if(oe)throw oe;
+            write(KEY.cart,[]);await syncCartToDatabase([]);toast('Order placed successfully.');location.href='myorders.html';
+        }catch(err){toast(err.message,'error');btn.disabled=false;}
+    });
+};
+
+pages.orders = async () => {
+    const user=guard();if(!user)return;
+    const list=$('#ordersList');let tab='all',orders=[];
+    const labels={pending:'Pending Payment',toship:'To Ship',toreceive:'To Receive',completed:'Completed',cancelled:'Cancelled'};
+    const render=()=>{
+        const filtered=orders.filter(o=>tab==='all'||o.status===tab);
+        list.innerHTML=filtered.length?filtered.map(o=>`<div class="order-card" data-id="${o.id}">
+          <div class="order-header"><span>Order ID: <span class="order-id">#${o.id}</span></span><span class="status ${o.status}">${labels[o.status]||o.status}</span></div>
+          ${(o.items||[]).map(i=>`<div class="order-item"><div class="item-info"><div class="item-name">${esc(i.title)}</div><div class="item-qty">Quantity: x${i.qty}</div></div><div class="item-price">${money(i.price*i.qty)}</div></div>`).join('')}
+          <p class="hint">Scheduled delivery: <strong>${o.delivery_date||'Not yet scheduled'}</strong></p>
+          <div class="order-footer"><div class="order-total">Total Amount: <strong>${money(o.total)}</strong></div><div class="order-actions">${o.status==='toreceive'?'<button class="btn btn-primary" data-received>Order Received</button>':''}</div></div></div>`).join(''):'<div class="card empty-state"><p>No orders in this tab yet.</p></div>';
+    };
+    const {data,error}=await sbClient.from('orders').select('*,order_item(*),address(*)').eq('user_id',user.id).order('created_at',{ascending:false});
+    if(error)throw error;
+    orders=(data||[]).map(o=>({id:o.order_id,status:String(o.order_status),total:Number(o.total_amount),delivery_date:o.delivery_date,items:(o.order_item||[]).map(i=>({title:i.item_name||'PC Component',qty:i.quantity,price:Number(i.unit_price)}))}));
+    render();
+    $('#orderTabs').addEventListener('click',e=>{const b=e.target.closest('.tab-btn');if(!b)return;$$('.tab-btn').forEach(x=>x.classList.toggle('active',x===b));tab=b.dataset.tab;render();});
+    list.addEventListener('click',async e=>{
+        const b=e.target.closest('[data-received]');if(!b)return;
+        const id=Number(b.closest('.order-card').dataset.id);
+        if(!confirm('Are you sure you have received this order?'))return;
+        const {error}=await sbClient.from('orders').update({order_status:'completed',received_at:new Date().toISOString()}).eq('order_id',id).eq('user_id',user.id);
+        if(error)return toast(error.message,'error');
+        orders=orders.map(o=>o.id===id?{...o,status:'completed'}:o);render();toast('Order marked as received.');
+    });
+};
+
+pages.settings = async () => {
+    const user=guard();if(!user)return;
+    await fetchProfileAndAddress(user.id);
+    const pf=$('#profileForm'),af=$('#addressForm');
+    ['username','name','email','phone'].forEach(k=>{if(pf.elements[k])pf.elements[k].value=user[k]||'';});
+    ['address','city','zip'].forEach(k=>{if(af.elements[k])af.elements[k].value=user[k]||'';});
+    pf.addEventListener('submit',async e=>{
+        e.preventDefault();const d=Object.fromEntries(new FormData(pf));
+        try{
+            const {error}=await sbClient.from('profiles').update({username:d.username,name:d.name,email:d.email,phone:d.phone}).eq('id',user.id);if(error)throw error;
+            const {error:ue}=await sbClient.from('users').update({username:d.username,name:d.name,email:d.email}).eq('user_id',user.id);if(ue)throw ue;
+            if(d.email!==user.email){const {error:ae}=await sbClient.auth.updateUser({email:d.email});if(ae)throw ae;}
+            await loadAuthUser();toast('Profile updated.');
+        }catch(err){toast(err.message,'error');}
+    });
+    af.addEventListener('submit',async e=>{
+        e.preventDefault();const d=Object.fromEntries(new FormData(af));
+        try{
+            const {data:old}=await sbClient.from('address').select('address_id').eq('user_id',user.id).eq('is_default',true).maybeSingle();
+            const payload={user_id:user.id,street:d.address,city:d.city,postal_code:d.zip,country:'PH',is_default:true};
+            const result=old?await sbClient.from('address').update(payload).eq('address_id',old.address_id):await sbClient.from('address').insert(payload);
+            if(result.error)throw result.error;
+            const {error}=await sbClient.from('profiles').update({address:d.address,city:d.city,zip:d.zip}).eq('id',user.id);if(error)throw error;
+            await loadAuthUser();toast('Shipping address updated.');
+        }catch(err){toast(err.message,'error');}
+    });
+    $('#passwordForm').addEventListener('submit',async e=>{
+        e.preventDefault();const d=Object.fromEntries(new FormData(e.target));
+        if(d.next.length<8)return toast('Password must be at least 8 characters.','error');
+        if(d.next!==d.confirm)return toast('New passwords do not match.','error');
+        const {error}=await sbClient.auth.updateUser({password:d.next});
+        if(error)return toast(error.message,'error');
+        e.target.reset();toast('Password updated.');
+    });
+};
+
+pages.staff = async () => {
+    const staff=guard(['staff','admin']);if(!staff)return;
+    const tbody=$('#queueBody');
+    const load=async()=>{
+        const {data,error}=await sbClient.from('orders').select('*,users(username,email,name),address(*),order_item(*)').order('created_at',{ascending:false});
+        if(error)throw error;
+        const orders=data||[];
+        tbody.innerHTML=orders.length?orders.map(o=>{
+            const items=o.order_item||[], customer=o.users?.name||o.users?.email||'Customer';
+            return `<tr data-id="${o.order_id}"><td>#${o.order_id}<button class="btn btn-sm btn-soft" data-expand>Details</button></td><td>${esc(customer)}</td><td>${items.length} item(s)</td><td>${money(o.total_amount)}</td><td><span class="status">${esc(o.order_status)}</span></td><td><input type="date" class="edit-input date" data-date value="${o.delivery_date||''}"></td><td>${o.order_status==='pending'?'<button class="btn btn-sm btn-soft" data-ship>Mark To Ship</button>':'<button class="btn btn-sm btn-primary" data-ship>Update Status</button>'}</td></tr>
+            <tr class="order-detail-row" data-detail-for="${o.order_id}" hidden><td colspan="7"><strong>Shipping address:</strong> ${esc([o.address?.street,o.address?.city,o.address?.postal_code,o.address?.country].filter(Boolean).join(', ')||'No address')}<br><strong>Items:</strong><ul>${items.map(i=>`<li>${esc(i.item_name||'Component')} × ${i.quantity} — ${money(i.unit_price)}</li>`).join('')}</ul><strong>Customer note:</strong> ${esc(o.customer_note||'None')}</td></tr>`;
+        }).join(''):'<tr><td colspan="7" class="table-empty">No orders yet.</td></tr>';
+        $('#mItems').textContent=Products.list.reduce((n,p)=>n+p.stock,0);
+        $('#mSale').textContent=money(orders.filter(o=>o.order_status!=='pending').reduce((n,o)=>n+Number(o.total_amount),0));
+        const {count}=await sbClient.from('service_reservation').select('*',{count:'exact',head:true});$('#mBookings').textContent=count||0;
+        $('#mReports').textContent='—';
+    };
+    await Products.load();await load();
+    const ticketsBody=$('#staffTicketsBody');
+    const loadStaffTickets=async()=>{
+        const [{data:w,error:we},{data:s,error:se}]=await Promise.all([
+            sbClient.from('warranty_request').select('*,users(name,email),component(name)').order('created_at',{ascending:false}),
+            sbClient.from('service_reservation').select('*,users(name,email)').order('created_at',{ascending:false})
+        ]);
+        if(we)throw we;if(se)throw se;
+        const rows=[...(w||[]).map(x=>({id:x.warranty_id,table:'warranty_request',key:'warranty_id',customer:x.customer_name||x.users?.name||x.users?.email,device:x.component?.name||x.product_id,type:'Warranty',details:x.description,contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),date:x.created_at,receipt:x.receipt_code,status:x.status})),
+          ...(s||[]).map(x=>({id:x.reservation_id,table:'service_reservation',key:'reservation_id',customer:x.customer_name||x.users?.name||x.users?.email,device:x.device_details||x.service_type,type:'Service',details:x.notes,contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),date:x.appointment_date,status:x.status}))];
+        ticketsBody.innerHTML=rows.map(x=>`<tr data-table="${x.table}" data-key="${x.key}" data-id="${x.id}"><td>#${x.id}</td><td>${esc(x.customer||'Customer')}</td><td>${esc(x.device||'')}</td><td>${x.type}</td><td><details><summary>View details</summary>${esc(x.details||'No details')}<br>Contact: ${esc(x.contact||'Not provided')}<br>Date: ${esc(x.date||'Not provided')}${x.receipt?'<br>Receipt / order: '+esc(x.receipt):''}</details></td><td>${esc(x.status)}</td><td><select class="edit-input" data-ticket-status><option value="${esc(x.status)}">${esc(x.status)}</option><option value="in_progress">In progress</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="resolved">Resolved</option></select></td></tr>`).join('')||'<tr><td colspan="7" class="table-empty">No service or warranty requests.</td></tr>';
+    };
+    await loadStaffTickets();
+    ticketsBody.addEventListener('change',async e=>{
+        if(!e.target.matches('[data-ticket-status]'))return;
+        const row=e.target.closest('tr'),{error}=await sbClient.from(row.dataset.table).update({status:e.target.value}).eq(row.dataset.key,row.dataset.id);
+        if(error)return toast(error.message,'error');toast('Request status updated.');
+    });
+    tbody.addEventListener('click',async e=>{
+        const row=e.target.closest('tr[data-id]');if(!row)return;
+        if(e.target.closest('[data-expand]')){const detail=$(`[data-detail-for="${row.dataset.id}"]`,tbody);detail.hidden=!detail.hidden;}
+        if(e.target.closest('[data-ship]')){
+            const date=$('[data-date]',row).value;
+            const next=row.querySelector('.status')?.textContent==='pending'?'toship':'toreceive';
+            const {error}=await sbClient.from('orders').update({order_status:next,delivery_date:date||null,shipped_at:next==='toreceive'?new Date().toISOString():null}).eq('order_id',row.dataset.id);
+            if(error)return toast(error.message,'error');await load();toast('Order and delivery schedule updated.');
+        }
+    });
+    tbody.addEventListener('change',async e=>{
+        if(!e.target.matches('[data-date]'))return;
+        const {error}=await sbClient.from('orders').update({delivery_date:e.target.value||null}).eq('order_id',e.target.closest('tr').dataset.id);
+        if(error)return toast(error.message,'error');toast('Delivery date saved.');
+    });
+    $('#reportBtn').addEventListener('click',()=>toast('Use the database sales and order views for the current report.'));
+    setupInventory($('#inventoryBody'),{addButton:$('#addProductBtn')});
+    makeDashboardTablesCollapsible(document,[['main .card:nth-of-type(1)','Order fulfillment records'],['main .card:nth-of-type(2)','Product inventory'],['main .card:nth-of-type(3)','Service and warranty requests']]);
+};
+
+
+function makeDashboardTablesCollapsible(root, labels) {
+    labels.forEach(([selector,label])=>{
+        const section=$(selector,root), wrap=section?.querySelector('.table-wrap');
+        if(!wrap || wrap.parentElement.tagName==='DETAILS')return;
+        const details=document.createElement('details'); details.className='dashboard-table-collapse'; details.open=true;
+        const summary=document.createElement('summary'); summary.textContent=label;
+        wrap.parentNode.insertBefore(details,wrap); details.append(summary,wrap);
+    });
+}
+
+pages.admin = async () => {
+    const admin=guard(['admin']);if(!admin)return;
+    const usersBody=$('#usersBody'),servicesBody=$('#servicesBody');
+    const loadUsers=async()=>{
+        const {data,error}=await sbClient.from('users').select('user_id,username,email,role,user_role,is_active,name').order('created_at',{ascending:false});
+        if(error)throw error;
+        usersBody.innerHTML=(data||[]).map(u=>`<tr data-id="${u.user_id}"><td>${u.user_id.slice(0,8)}</td><td>${esc(u.name||u.username)}</td><td>${esc(u.email)}</td><td><select class="edit-input" data-role ${u.user_id===admin.id?'disabled':''}>${['admin','staff','customer'].map(r=>`<option value="${r}" ${(u.role||u.user_role)===r?'selected':''}>${r}</option>`).join('')}</select></td><td>${u.is_active?'Active':'Suspended'}</td><td>${u.user_id===admin.id?'You':`<button class="btn btn-sm btn-soft" data-toggle>${u.is_active?'Suspend':'Reactivate'}</button>`}</td></tr>`).join('');
+        $('#mAccounts').textContent=(data||[]).length;
+    };
+    const loadTickets=async()=>{
+        const [{data:w,error:we},{data:s,error:se}]=await Promise.all([
+            sbClient.from('warranty_request').select('*,users(name,email),component(name)').order('created_at',{ascending:false}),
+            sbClient.from('service_reservation').select('*,users(name,email)').order('created_at',{ascending:false})
+        ]);
+        if(we)throw we;if(se)throw se;
+        const rows=[...(w||[]).map(x=>({id:x.warranty_id,kind:'Warranty',customer:x.customer_name||x.users?.name||x.users?.email,device:x.component?.name||x.product_id,details:x.description,contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),date:x.created_at,receipt:x.receipt_code,status:x.status,table:'warranty_request',key:'warranty_id'})),
+          ...(s||[]).map(x=>({id:x.reservation_id,kind:'Service',customer:x.customer_name||x.users?.name||x.users?.email,device:x.device_details||x.service_type,details:x.notes,contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),date:x.appointment_date,status:x.status,table:'service_reservation',key:'reservation_id'}))];
+        servicesBody.innerHTML=rows.map(x=>`<tr data-table="${x.table}" data-key="${x.key}" data-id="${x.id}"><td>#${x.id}</td><td>${esc(x.customer||'Customer')}</td><td>${esc(x.device||'')}</td><td>${x.kind}</td><td>${esc(x.status)}</td><td><details><summary>Details</summary>${esc(x.details||'No details')}<br>Contact: ${esc(x.contact||'Not provided')}<br>Date: ${esc(x.date||'Not provided')}${x.receipt?'<br>Receipt / order: '+esc(x.receipt):''}</details><select data-ticket-status class="edit-input"><option>${esc(x.status)}</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="in_progress">In progress</option><option value="resolved">Resolved</option></select></td></tr>`).join('')||'<tr><td colspan="6">No requests yet.</td></tr>';
+        $('#mServices').textContent=rows.filter(x=>!['resolved','rejected'].includes(String(x.status))).length;
+    };
+    await Promise.all([Products.load(),loadUsers(),loadTickets()]);
+    usersBody.addEventListener('change',async e=>{
+        if(!e.target.matches('[data-role]'))return;
+        const id=e.target.closest('tr').dataset.id,role=e.target.value;
+        const {error}=await sbClient.from('users').update({role,user_role:role}).eq('user_id',id);
+        if(error){toast(error.message,'error');return loadUsers();}toast('User role updated.');
+    });
+    usersBody.addEventListener('click',async e=>{
+        if(!e.target.closest('[data-toggle]'))return;
+        const row=e.target.closest('tr'),id=row.dataset.id;
+        const active=row.children[4].textContent.trim()!=='Active';
+        const {error}=await sbClient.from('users').update({is_active:active}).eq('user_id',id);
+        if(error)return toast(error.message,'error');await loadUsers();toast('Account status updated.');
+    });
+    servicesBody.addEventListener('change',async e=>{
+        if(!e.target.matches('[data-ticket-status]'))return;
+        const row=e.target.closest('tr'),table=row.dataset.table,key=row.dataset.key;
+        const status=e.target.value;
+        const {error}=await sbClient.from(table).update({status}).eq(key,row.dataset.id);
+        if(error)return toast(error.message,'error');toast('Request status updated.');
+    });
+    $('#addUserBtn').addEventListener('click',()=>toast('Create staff/admin accounts through Supabase Auth invitation or approved signup workflow. Do not create passwords in the client.'));
+    const {data:metricOrders,error:mo}=await sbClient.from('orders').select('total_amount,order_status');
+    if(!mo){
+        $('#mOrders').textContent=metricOrders.length;
+        $('#mRevenue').textContent=money(metricOrders.filter(o=>o.order_status!=='pending').reduce((n,o)=>n+Number(o.total_amount),0));
+    }
+    setupInventory($('#inventoryBody'),{canDelete:true,addButton:$('#addProductBtn')});
+    makeDashboardTablesCollapsible(document,[['main .card:nth-of-type(1)','Product inventory'],['main .card:nth-of-type(2)','User accounts'],['main .card:nth-of-type(3)','Service and warranty requests']]);
+};
+
+/* End Supabase integration overrides */
+
 /* ===== Boot ===== */
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
     const footer = $('#footer');
     if (footer) {
         footer.className = 'footer';
         footer.innerHTML = '<div class="footer-container"><p class="copyright">&copy; 2026 iWant PC Inc. All rights reserved.</p><div class="footer-links"><a href="#">Privacy Policy</a><a href="#">Terms of Service</a></div></div>';
     }
-    document.addEventListener('click', e => { if (e.target.closest('[data-logout]')) localStorage.removeItem(KEY.session); });
-    const init = pages[document.body.dataset.page];
-    if (init) Promise.resolve(init()).catch(err => { console.error(err); toast(esc(err.message || 'Something went wrong loading this page.'), 'error'); });
+    document.addEventListener('click', async e => {
+        if (e.target.closest('[data-logout]')) { e.preventDefault(); await sbClient.auth.signOut(); AUTH_USER=null; location.href='login.html'; }
+    });
+    try {
+        await loadAuthUser();
+        if (AUTH_USER) await fetchProfileAndAddress(AUTH_USER.id);
+        const page = document.body.dataset.page;
+        const publicPages = ['login','signup'];
+        if (!AUTH_USER && !publicPages.includes(page)) { location.replace('login.html'); return; }
+        if (AUTH_USER && publicPages.includes(page)) { location.replace(homeFor(AUTH_USER.role)); return; }
+        if (AUTH_USER) await loadCartFromDatabase().catch(err => console.warn('Cart could not be hydrated:',err.message));
+        const init = pages[page];
+        if (init) await init();
+    } catch (err) {
+        console.error(err);
+        toast(esc(err.message || 'Something went wrong loading this page.'), 'error');
+    }
 });
