@@ -33,11 +33,10 @@ async function uploadProductImage(blob, name) {
     const slug = String(name || 'product').replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase().slice(0, 40) || 'product';
     const path = `${Date.now()}-${slug}.jpg`;
     let res;
-    const accessToken = (await sbClient.auth.getSession()).data?.session?.access_token;
     try {
         res = await fetch(`${SUPABASE_URL}/storage/v1/object/${IMAGE_BUCKET}/${path}`, {
             method: 'POST',
-            headers: { apikey: SUPABASE_PUBLISHABLE_KEY, ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}), 'Content-Type': blob.type || 'image/jpeg', 'x-upsert': 'false' },
+            headers: { apikey: SUPABASE_PUBLISHABLE_KEY, 'Content-Type': blob.type || 'image/jpeg', 'x-upsert': 'false' },
             body: blob
         });
     } catch { throw new Error('Image upload failed: could not reach Supabase Storage.'); }
@@ -186,7 +185,7 @@ const Products = {
     },
     get(id) { return this.list.find(p => sameId(p.id, id)); },
     byTitle(title) { return this.list.find(p => p.title === title); },
-    byCategory(cat) { return this.list.filter(p => p.category === cat && p.active !== false); },
+    byCategory(cat) { return this.list.filter(p => p.category === cat); },
     async create(data) {
         const rows = await sb('products', { method: 'POST', body: data, prefer: 'return=representation' });
         if (!rows || !rows.length) throw new Error('The product was not created. Your database policies may block inserts.');
@@ -426,13 +425,13 @@ function setupInventory(tbody, { canDelete = false, addButton = null } = {}) {
         <tr data-id="${esc(p.id)}">
             <td><img class="thumb" src="${productImg(p)}" alt="${esc(p.title)}" loading="lazy"></td>
             <td><strong>${esc(p.title)}</strong><div class="sub">${esc(p.description)}</div></td>
-            <td>${esc(CATEGORIES[p.category] || p.category)}${p.active===false?'<div class="sub">Inactive</div>':''}</td>
+            <td>${esc(CATEGORIES[p.category] || p.category)}</td>
             <td><div class="chips">${specChips(p) || '<span class="stock">No specs yet</span>'}</div></td>
             <td><input class="edit-input narrow" type="number" min="0" step="1" data-f="stock" value="${p.stock}" aria-label="Stock for ${esc(p.title)}"></td>
             <td><input class="edit-input narrow" type="number" min="0" step="0.01" data-f="price" value="${p.price.toFixed(2)}" aria-label="Price for ${esc(p.title)}"></td>
             <td class="actions">
                 <button class="btn btn-sm btn-soft" data-edit><i class="fa-solid fa-pen"></i> Edit</button>
-                ${canDelete ? (p.active===false ? '<button class="btn btn-sm btn-soft" data-reactivate>Reactivate</button>' : '<button class="btn btn-sm btn-outline danger" data-delete aria-label="Deactivate product"><i class="fa-solid fa-trash"></i></button>') : ''}
+                ${canDelete ? '<button class="btn btn-sm btn-outline danger" data-delete aria-label="Delete product"><i class="fa-solid fa-trash"></i></button>' : ''}
             </td>
         </tr>`;
     const matches = p => (filterCat.value === 'all' || p.category === filterCat.value)
@@ -548,16 +547,9 @@ function setupInventory(tbody, { canDelete = false, addButton = null } = {}) {
         const p = Products.get(row.dataset.id);
         if (!p) return;
         if (e.target.closest('[data-edit]')) openModal(p);
-        if (e.target.closest('[data-delete]') && confirm(`Deactivate "${p.title}"? It will no longer appear in the customer catalog.`)) {
-            try { await Products.remove(p.id); await load(); toast('Component deactivated.'); }
+        if (e.target.closest('[data-delete]') && confirm(`Delete "${p.title}"? This cannot be undone.`)) {
+            try { await Products.remove(p.id); render(); changed(); toast('Product deleted.'); }
             catch (err) { toast(esc(err.message), 'error'); }
-        }
-        if (e.target.closest('[data-reactivate]')) {
-            try {
-                const { error } = await sbClient.from('component').update({is_active:true}).eq('component_id',p.id);
-                if (error) throw error;
-                await load(); toast('Component reactivated and visible in the store.');
-            } catch (err) { toast(esc(err.message), 'error'); }
         }
     });
     tbody.addEventListener('change', async e => {
@@ -1196,14 +1188,13 @@ async function loadAuthUser() {
 const componentToProduct = r => ({
     ...r, id: r.component_id, title: r.name, stock: Number(r.stock_level) || 0,
     price: Number(r.price) || 0, image: r.image_url || '', description: r.description || '',
-    active: r.is_active !== false,
     specs: { ...(r.specs || {}), socket: r.socket || r.specs?.socket,
         memory_type: r.ram_type || r.specs?.memory_type,
         wattage: r.psu_watts || r.specs?.wattage, min_psu_watts: r.min_psu_watts || r.specs?.min_psu_watts }
 });
 Object.assign(Products, {
     async load() {
-        const { data, error } = await sbClient.from('component').select('*').order('category').order('name');
+        const { data, error } = await sbClient.from('component').select('*').eq('is_active', true).order('category').order('name');
         if (error) throw error;
         this.list = (data || []).map(componentToProduct).sort(byCatTitle);
         return this.list;
@@ -1346,7 +1337,7 @@ pages.home = async () => {
     let category='all', sales={};
     const render=()=>{
         const q=search.value.trim().toLowerCase();
-        const list=Products.list.filter(p=>p.active!==false&&(category==='all'||p.category===category)&&`${p.title} ${p.description} ${Object.values(p.specs).join(' ')}`.toLowerCase().includes(q));
+        const list=Products.list.filter(p=>(category==='all'||p.category===category)&&`${p.title} ${p.description} ${Object.values(p.specs).join(' ')}`.toLowerCase().includes(q));
         grid.innerHTML=list.length?list.map(p=>`<article class="product-card" data-id="${esc(p.id)}">
           <div class="product-image"><img src="${productImg(p)}" alt="${esc(p.title)}" loading="lazy"></div>
           <div class="product-info"><h3 class="product-title">${esc(p.title)}</h3><div class="chips">${specChips(p,3)}</div><p class="product-description">${esc(p.description)}</p></div>
@@ -1369,79 +1360,24 @@ pages.home = async () => {
         }
     });
     $$('[data-prefill]').forEach(b=>b.addEventListener('click',()=>$('#bookingType').value=b.dataset.prefill));
-
-    const bookingType=$('#bookingType');
-    const bookingDevice=$('#bookingDevice');
-    const bookingDeviceSelect=$('#bookingDeviceSelect');
-    let purchasedOrderItems=[];
-    const loadPurchasedWarrantyItems=async()=>{
-        bookingDeviceSelect.innerHTML='<option value="">Loading your purchased items...</option>';
-        const {data:orders,error}=await sbClient.from('orders')
-            .select('order_id,order_status,order_item(order_item_id,product_id,item_name,quantity)')
-            .eq('user_id',user.id).order('created_at',{ascending:false});
-        if(error)throw error;
-        const lines=(orders||[])
-            .filter(o=>!['pending','cancelled'].includes(String(o.order_status)))
-            .flatMap(o=>(o.order_item||[]).filter(i=>i.product_id!=null).map(i=>({...i,order_id:o.order_id})));
-        const ids=[...new Set(lines.map(i=>Number(i.product_id)).filter(Number.isFinite))];
-        let components=[];
-        if(ids.length){
-            const {data,error:ce}=await sbClient.from('component').select('component_id,name').in('component_id',ids);
-            if(ce)throw ce;
-            components=data||[];
-        }
-        const names=new Map(components.map(c=>[String(c.component_id),c.name]));
-        purchasedOrderItems=lines.map(i=>({...i,component_name:names.get(String(i.product_id))||i.item_name||`Component #${i.product_id}`}));
-        bookingDeviceSelect.innerHTML='<option value="">Select a purchased component</option>'+
-            purchasedOrderItems.map(i=>`<option value="${esc(i.order_item_id)}">${esc(i.component_name)} — Order #${esc(i.order_id)} (Qty: ${Number(i.quantity)||1})</option>`).join('');
-        if(!purchasedOrderItems.length) bookingDeviceSelect.innerHTML='<option value="">No eligible purchased items found</option>';
-    };
-    const syncBookingDeviceControl=async()=>{
-        const isWarranty=bookingType.value.toLowerCase().includes('warranty');
-        bookingDevice.hidden=isWarranty;
-        bookingDevice.required=!isWarranty;
-        bookingDeviceSelect.hidden=!isWarranty;
-        bookingDeviceSelect.disabled=!isWarranty;
-        bookingDeviceSelect.required=isWarranty;
-        if(isWarranty){
-            try{await loadPurchasedWarrantyItems();}
-            catch(err){bookingDeviceSelect.innerHTML='<option value="">Could not load purchased items</option>';toast(err.message,'error');}
-        }
-    };
-    bookingType.addEventListener('change',syncBookingDeviceControl);
-    syncBookingDeviceControl();
-
     $('#bookingForm').addEventListener('submit',async e=>{
-        e.preventDefault();
-        if(!(await requireCompleteProfile()))return;
-        const type=bookingType.value, details=$('#bookingDetails').value.trim();
-        const submit=$('button[type="submit"]',e.target);
-        submit.disabled=true;
-        try{
+        e.preventDefault(); if(!(await requireCompleteProfile()))return;
+        const type=$('#bookingType').value, device=$('#bookingDevice').value.trim(), details=$('#bookingDetails').value.trim();
+        try {
             if(type.toLowerCase().includes('warranty')){
-                const selected=purchasedOrderItems.find(i=>String(i.order_item_id)===String(bookingDeviceSelect.value));
-                if(!selected)throw new Error('Please select an item from your eligible purchase history. Warranty claims are only available for items you have ordered.');
-                const {error:we}=await sbClient.from('warranty_request').insert({
-                    user_id:user.id,product_id:selected.product_id,order_item_id:selected.order_item_id,
-                    description:details,customer_name:user.name,customer_email:user.email,
-                    customer_phone:user.phone,receipt_code:String(selected.order_id)
-                });
+                const {data:orders,error}=await sbClient.from('orders').select('order_id,order_status,order_item(order_item_id,product_id,item_name,quantity)').eq('user_id',user.id).eq('order_status','completed');
+                if(error)throw error;
+                const matches=(orders||[]).flatMap(o=>(o.order_item||[]).map(i=>({...i,order_id:o.order_id}))).filter(i=>(i.item_name||'').toLowerCase()===device.toLowerCase()||String(i.product_id)===device);
+                if(!matches.length)throw new Error('Warranty claims are accepted only for items in your completed purchases. Enter the exact purchased product name or product ID.');
+                const item=matches[0];
+                const {error:we}=await sbClient.from('warranty_request').insert({user_id:user.id,product_id:item.product_id,order_item_id:item.order_item_id,description:details,customer_name:user.name,customer_email:user.email,customer_phone:user.phone,receipt_code:String(item.order_id)});
                 if(we)throw we;
             } else {
-                const device=bookingDevice.value.trim();
-                if(!device)throw new Error('Please enter the device or part.');
-                const {error}=await sbClient.from('service_reservation').insert({
-                    user_id:user.id,service_type:type.toLowerCase().includes('consult')?'consultation':'repair',
-                    status:'requested',appointment_date:new Date().toISOString(),notes:details,
-                    device_details:device,customer_name:user.name,customer_email:user.email,customer_phone:user.phone
-                });
+                const {error}=await sbClient.from('service_reservation').insert({user_id:user.id,service_type:type.toLowerCase().includes('consult')?'consultation':'repair',status:'requested',appointment_date:new Date().toISOString(),notes:details,device_details:device,customer_name:user.name,customer_email:user.email,customer_phone:user.phone});
                 if(error)throw error;
             }
-            e.target.reset();
-            await syncBookingDeviceControl();
-            toast('Request submitted successfully.');
+            e.target.reset();toast('Request submitted successfully.');
         }catch(err){toast(err.message,'error');}
-        finally{submit.disabled=false;}
     });
 };
 
@@ -1457,49 +1393,72 @@ pages.checkout = async () => {
     $('#summaryRows').innerHTML=cart.map(i=>`<div class="summary-row"><span>${esc(i.title)} (x${i.qty})</span><span>${money(i.price*i.qty)}</span></div>`).join('')+
       `<div class="summary-row"><span>Subtotal</span><span>${money(t.subtotal)}</span></div><div class="summary-row"><span>Tax</span><span>${money(t.tax)}</span></div><div class="summary-row"><span>Shipping</span><span>${money(t.shipping)}</span></div>`;
     $('#sumTotal').textContent=money(t.total);$('#shipTo').textContent='Ship to: '+address;
-
     $('#checkoutForm').addEventListener('submit',async e=>{
-        e.preventDefault();
-        const btn=$('button[type="submit"]',e.target);
-        btn.disabled=true;
+        e.preventDefault();const btn=$('button[type="submit"]',e.target);btn.disabled=true;
         try{
-            const fd=new FormData(e.target), payment=String(fd.get('payment')||'cod');
-            const addressPayload={
-                user_id:user.id,street:user.address,city:user.city,postal_code:user.zip,country:'PH',is_default:true
-            };
-            const {data:existingAddress,error:findError}=await sbClient.from('address')
-                .select('address_id').eq('user_id',user.id).eq('is_default',true).maybeSingle();
-            if(findError)throw findError;
-            let addressId;
-            if(existingAddress){
-                const {data,error}=await sbClient.from('address').update(addressPayload)
-                    .eq('address_id',existingAddress.address_id).select('address_id').single();
-                if(error)throw error;
-                addressId=data.address_id;
-            }else{
-                const {data,error}=await sbClient.from('address').insert(addressPayload)
-                    .select('address_id').single();
-                if(error)throw error;
-                addressId=data.address_id;
-            }
+            const fd=new FormData(e.target), payment=fd.get('payment');
 
-            // The RPC creates the order, order items, payment record, and stock deductions atomically.
-            const {data:orderId,error:orderError}=await sbClient.rpc('place_order_secure',{
-                p_address_id:addressId,
-                p_items:cart.map(i=>({component_id:Number(i.id),quantity:i.qty})),
-                p_payment_method:payment,
-                p_customer_note:fd.get('note')||''
-            });
-            if(orderError)throw orderError;
-            if(!orderId)throw new Error('The database did not return an order number. Please check your purchase history before trying again.');
-            write(KEY.cart,[]);
-            await syncCartToDatabase([]);
-            toast(`Order #${orderId} placed successfully.`);
-            location.href='myorders.html';
-        }catch(err){
-            toast(err.message||'Unable to place order.','error');
-            btn.disabled=false;
-        }
+const addressPayload = {
+    user_id: user.id,
+    street: user.address,
+    city: user.city,
+    postal_code: user.zip,
+    country: 'PH',
+    is_default: true
+};
+
+// Check if customer already has a default address
+const { data: existingAddress, error: findError } =
+    await sbClient
+        .from('address')
+        .select('address_id')
+        .eq('user_id', user.id)
+        .eq('is_default', true)
+        .maybeSingle();
+
+if (findError) throw findError;
+
+let addressId;
+
+if (existingAddress) {
+    // Update existing default address
+    const { data, error } = await sbClient
+        .from('address')
+        .update(addressPayload)
+        .eq('address_id', existingAddress.address_id)
+        .select('address_id')
+        .single();
+
+    if (error) throw error;
+    addressId = data.address_id;
+
+} else {
+    // Insert only when no default address exists
+    const { data, error } = await sbClient
+        .from('address')
+        .insert(addressPayload)
+        .select('address_id')
+        .single();
+
+    if (error) throw error;
+    addressId = data.address_id;
+
+// Create the order in Supabase
+const { data: orderId, error: oe } =
+    await sbClient.rpc('place_order_secure', {
+        p_address_id: addressId,
+        p_items: cart.map(i => ({
+            component_id: Number(i.id),
+            quantity: i.qty
+        })),
+        p_payment_method: payment,
+        p_customer_note: fd.get('note') || ''
+    });
+
+if (oe) throw oe;
+}
+            write(KEY.cart,[]);await syncCartToDatabase([]);toast('Order placed successfully.');location.href='myorders.html';
+        }catch(err){toast(err.message,'error');btn.disabled=false;}
     });
 };
 
