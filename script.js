@@ -1397,15 +1397,66 @@ pages.checkout = async () => {
         e.preventDefault();const btn=$('button[type="submit"]',e.target);btn.disabled=true;
         try{
             const fd=new FormData(e.target), payment=fd.get('payment');
-            const {data:addr,error:ae}=await sbClient.from('address').insert({user_id:user.id,street:user.address,city:user.city,postal_code:user.zip,country:'PH',is_default:true}).select('address_id').single();
-            if(ae)throw ae;
-            const {data:orderId,error:oe}=await sbClient.rpc('place_order_secure',{
-                p_address_id:addr.address_id,
-                p_items:cart.map(i=>({component_id:Number(i.id),quantity:i.qty})),
-                p_payment_method:payment,
-                p_customer_note:fd.get('note')||''
-            });
-            if(oe)throw oe;
+
+const addressPayload = {
+    user_id: user.id,
+    street: user.address,
+    city: user.city,
+    postal_code: user.zip,
+    country: 'PH',
+    is_default: true
+};
+
+// Check if customer already has a default address
+const { data: existingAddress, error: findError } =
+    await sbClient
+        .from('address')
+        .select('address_id')
+        .eq('user_id', user.id)
+        .eq('is_default', true)
+        .maybeSingle();
+
+if (findError) throw findError;
+
+let addressId;
+
+if (existingAddress) {
+    // Update existing default address
+    const { data, error } = await sbClient
+        .from('address')
+        .update(addressPayload)
+        .eq('address_id', existingAddress.address_id)
+        .select('address_id')
+        .single();
+
+    if (error) throw error;
+    addressId = data.address_id;
+
+} else {
+    // Insert only when no default address exists
+    const { data, error } = await sbClient
+        .from('address')
+        .insert(addressPayload)
+        .select('address_id')
+        .single();
+
+    if (error) throw error;
+    addressId = data.address_id;
+
+// Create the order in Supabase
+const { data: orderId, error: oe } =
+    await sbClient.rpc('place_order_secure', {
+        p_address_id: addressId,
+        p_items: cart.map(i => ({
+            component_id: Number(i.id),
+            quantity: i.qty
+        })),
+        p_payment_method: payment,
+        p_customer_note: fd.get('note') || ''
+    });
+
+if (oe) throw oe;
+
             write(KEY.cart,[]);await syncCartToDatabase([]);toast('Order placed successfully.');location.href='myorders.html';
         }catch(err){toast(err.message,'error');btn.disabled=false;}
     });
