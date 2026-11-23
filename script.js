@@ -53,7 +53,6 @@ const KEY = {
     users: 'iwp_users', session: 'iwp_session', cart: 'iwp_cart', orders: 'iwp_orders', bookings: 'iwp_bookings',
     reports: 'iwp_reports', build: 'iwp_build', buildNote: 'iwp_build_note', prefill: 'iwp_booking_prefill'
 };
-const TAX_RATE = 0.08;
 const SHIPPING_FEE = 15;
 const ASSEMBLY_FEE = 50;
 const ASSEMBLY_ID = 'svc-assembly';
@@ -120,16 +119,15 @@ const SPEC_FIELDS = {
 const $ = (sel, root = document) => root.querySelector(sel); const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const read = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } };
 const write = (key, value) => localStorage.setItem(key, JSON.stringify(value));
-const money = n => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const money = n => '₱' + Number(n).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const uid = prefix => prefix + Date.now().toString().slice(-6);
 const sameId = (a, b) => String(a) === String(b);
 
 function totals(items) {
     const subtotal = items.reduce((sum, i) => sum + i.price * i.qty, 0);
-    const tax = subtotal * TAX_RATE;
     const shipping = items.length ? SHIPPING_FEE : 0;
-    return { subtotal, tax, shipping, total: subtotal + tax + shipping };
+    return { subtotal, shipping, total: subtotal + shipping };
 }
 
 /* Product image placeholder (shown until staff add a real image) */
@@ -378,8 +376,7 @@ function initShell(user) {
         }).join('') : '<p class="cart-empty">Your cart is empty.</p>';
         const t = totals(cart);
         $('#cartSubtotal').textContent = money(t.subtotal);
-        $('#cartTax').textContent = money(t.tax);
-        $('#cartTotal').textContent = money(t.subtotal + t.tax);
+        $('#cartTotal').textContent = money(t.subtotal);
     };
     const toggleCart = open => { drawer.classList.toggle('open', open); overlay.classList.toggle('show', open); };
 
@@ -844,7 +841,7 @@ pages.checkout = async () => {
     if(!cart.length)throw new Error('Your cart items are no longer available.');
     const t=totals(cart),address=[user.address,user.city,user.zip].filter(Boolean).join(', ');
     $('#summaryRows').innerHTML=cart.map(i=>`<div class="summary-row"><span>${esc(i.title)} (x${i.qty})</span><span>${money(i.price*i.qty)}</span></div>`).join('')+
-      `<div class="summary-row"><span>Subtotal</span><span>${money(t.subtotal)}</span></div><div class="summary-row"><span>Tax</span><span>${money(t.tax)}</span></div><div class="summary-row"><span>Shipping</span><span>${money(t.shipping)}</span></div>`;
+      `<div class="summary-row"><span>Subtotal</span><span>${money(t.subtotal)}</span></div><div class="summary-row"><span>Shipping</span><span>${money(t.shipping)}</span></div>`;
     $('#sumTotal').textContent=money(t.total);$('#shipTo').textContent='Ship to: '+address;
     $('#checkoutForm').elements.payment.innerHTML='<option value="gcash" selected>GCash</option>';
     $('#checkoutForm').addEventListener('submit',async e=>{
@@ -1002,7 +999,7 @@ pages.staff = () => {
                 <td><span class="status ${o.status}">${ORDER_STATUS[o.status].label}</span></td>
                 <td><input type="date" class="edit-input date" data-date value="${esc(o.receiveDate || '')}" ${done ? 'disabled' : ''} aria-label="When to receive"></td>
                 <td class="actions">${action}</td></tr>`;
-        }).join('') || '<tr><td colspan="7" class="table-empty">No orders yet.</td></tr>';
+        }).join('') || '<tr><td colspan="8" class="table-empty">No orders yet.</td></tr>';
         renderMetrics();
     }
 
@@ -1410,7 +1407,7 @@ pages.checkout = async () => {
     if(!cart.length)throw new Error('Your cart items are no longer available.');
     const t=totals(cart),address=[user.address,user.city,user.zip].filter(Boolean).join(', ');
     $('#summaryRows').innerHTML=cart.map(i=>`<div class="summary-row"><span>${esc(i.title)} (x${i.qty})</span><span>${money(i.price*i.qty)}</span></div>`).join('')+
-      `<div class="summary-row"><span>Subtotal</span><span>${money(t.subtotal)}</span></div><div class="summary-row"><span>Tax</span><span>${money(t.tax)}</span></div><div class="summary-row"><span>Shipping</span><span>${money(t.shipping)}</span></div>`;
+      `<div class="summary-row"><span>Subtotal</span><span>${money(t.subtotal)}</span></div><div class="summary-row"><span>Shipping</span><span>${money(t.shipping)}</span></div>`;
     $('#sumTotal').textContent=money(t.total);$('#shipTo').textContent='Ship to: '+address;
     $('#checkoutForm').elements.payment.innerHTML='<option value="gcash" selected>GCash</option>';
     $('#checkoutForm').addEventListener('submit',async e=>{
@@ -1508,9 +1505,9 @@ pages.staff = async () => {
         tbody.innerHTML=orders.length?orders.map(o=>{
             const items=o.order_item||[], customer=o.users?.name||o.users?.email||'Customer';
             const action=o.order_status==='toreceive'?'<button class="btn btn-sm btn-ok" data-complete>Order Completed</button>':o.order_status==='completed'?'<span class="status">Completed</span>':'<button class="btn btn-sm btn-primary" data-ship>Update Status</button>';
-            return `<tr data-id="${o.order_id}"><td>#${o.order_id}<button class="btn btn-sm btn-soft" data-expand>Details</button></td><td>${esc(customer)}</td><td>${items.length} item(s)</td><td>${money(o.total_amount)}</td><td><span class="status">${esc(o.order_status)}</span></td><td><input type="date" class="edit-input date" data-date value="${o.delivery_date||''}"></td><td>${action}${o.proof_image_url?`<br><a href="${esc(o.proof_image_url)}" target="_blank" rel="noopener">View proof</a>`:''}</td></tr>
-            <tr class="order-detail-row" data-detail-for="${o.order_id}" hidden><td colspan="7"><strong>Shipping address:</strong> ${esc([o.address?.street,o.address?.city,o.address?.postal_code,o.address?.country].filter(Boolean).join(', ')||'No address')}<br><strong>Items:</strong><ul>${items.map(i=>`<li>${esc(i.item_name||'Component')} × ${i.quantity} — ${money(i.unit_price)}</li>`).join('')}</ul><strong>Customer note:</strong> ${esc(o.customer_note||'None')}</td></tr>`;
-        }).join(''):'<tr><td colspan="7" class="table-empty">No orders yet.</td></tr>';
+            return `<tr data-id="${o.order_id}"><td>#${o.order_id}<button class="btn btn-sm btn-soft" data-expand>Details</button></td><td>${esc(customer)}</td><td>${items.length} item(s)</td><td>${money(o.total_amount)}</td><td><span class="status">${esc(o.order_status)}</span></td><td><input type="date" class="edit-input date" data-date value="${o.delivery_date||''}"></td><td>${esc(o.customer_note||'—')}</td><td>${action}${o.proof_image_url?`<br><a href="${esc(o.proof_image_url)}" target="_blank" rel="noopener">View proof</a>`:''}</td></tr>
+            <tr class="order-detail-row" data-detail-for="${o.order_id}" hidden><td colspan="8"><strong>Shipping address:</strong> ${esc([o.address?.street,o.address?.city,o.address?.postal_code,o.address?.country].filter(Boolean).join(', ')||'No address')}<br><strong>Items:</strong><ul>${items.map(i=>`<li>${esc(i.item_name||'Component')} × ${i.quantity} — ${money(i.unit_price)}</li>`).join('')}</ul><strong>Customer note:</strong> ${esc(o.customer_note||'None')}</td></tr>`;
+        }).join(''):'<tr><td colspan="8" class="table-empty">No orders yet.</td></tr>';
         $('#mItems').textContent=Products.list.reduce((n,p)=>n+p.stock,0);
         $('#mSale').textContent=money(orders.filter(o=>o.order_status!=='pending').reduce((n,o)=>n+Number(o.total_amount),0));
         const {count}=await sbClient.from('service_reservation').select('*',{count:'exact',head:true});$('#mBookings').textContent=count||0;
@@ -1522,18 +1519,18 @@ pages.staff = async () => {
     const ticketsBody=$('#staffTicketsBody');
     const loadStaffTickets=async()=>{
         const [{data:w,error:we},{data:s,error:se}]=await Promise.all([
-            sbClient.from('warranty_request').select('*,users(name,email),component(name)').order('created_at',{ascending:false}),
-            sbClient.from('service_reservation').select('*,users(name,email)').order('created_at',{ascending:false})
+            sbClient.from('warranty_request').select('*,component:component!warranty_request_product_id_fkey(name)').order('created_at',{ascending:false}),
+            sbClient.from('service_reservation').select('*').order('created_at',{ascending:false})
         ]);
         if(we)throw we;if(se)throw se;
-        const rows=[...(w||[]).map(x=>({id:x.warranty_id,table:'warranty_request',key:'warranty_id',customer:x.customer_name||x.users?.name||x.users?.email,device:x.component?.name||x.product_id,type:'Warranty',details:x.description,contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),date:x.created_at,receipt:x.receipt_code,status:x.status})),
-          ...(s||[]).map(x=>({id:x.reservation_id,table:'service_reservation',key:'reservation_id',customer:x.customer_name||x.users?.name||x.users?.email,device:x.device_details||x.service_type,type:'Service',details:x.notes,contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),date:x.appointment_date,status:x.status}))];
+        const rows=[...(w||[]).map(x=>({id:x.warranty_id,table:'warranty_request',key:'warranty_id',customer:x.customer_name||x.customer_email||'Customer',device:x.component?.name||x.product_id,type:'Warranty',details:x.description,contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),date:x.created_at,receipt:x.receipt_code,status:x.status})),
+          ...(s||[]).map(x=>({id:x.reservation_id,table:'service_reservation',key:'reservation_id',customer:x.customer_name||x.customer_email||'Customer',device:x.device_details||x.service_type,type:'Service',details:x.notes,contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),date:x.appointment_date,status:x.status}))];
         ticketsBody.innerHTML=rows.map(x=>`<tr data-table="${x.table}" data-key="${x.key}" data-id="${x.id}"><td>#${x.id}</td><td>${esc(x.customer||'Customer')}</td><td>${esc(x.device||'')}</td><td>${x.type}</td><td><details><summary>View details</summary>${esc(x.details||'No details')}<br>Contact: ${esc(x.contact||'Not provided')}<br>Date: ${esc(x.date||'Not provided')}${x.receipt?'<br>Receipt / order: '+esc(x.receipt):''}</details></td><td>${esc(x.status)}</td><td><select class="edit-input" data-ticket-status><option value="${esc(x.status)}">${esc(x.status)}</option><option value="in_progress">In progress</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="resolved">Resolved</option></select></td></tr>`).join('')||'<tr><td colspan="7" class="table-empty">No service or warranty requests.</td></tr>';
     };
     // Keep the order queue and service queue independent from inventory.
     load().catch(err=>{
         console.error('Staff order queue:',err);
-        tbody.innerHTML=`<tr><td colspan="7" class="table-empty">${esc(err.message||'Unable to load orders.')}</td></tr>`;
+        tbody.innerHTML=`<tr><td colspan="8" class="table-empty">${esc(err.message||'Unable to load orders.')}</td></tr>`;
     });
     loadStaffTickets().catch(err=>{
         console.error('Staff service queue:',err);
