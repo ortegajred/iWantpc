@@ -22,15 +22,13 @@
                 <p class="hint" id="shipTo"></p>
                 <label class="field"><span>Payment Method</span>
                     <select name="payment" required>
-                        <option value="cod">Cash on Delivery (COD)</option>
-                        <option value="gcash">GCash / E-Wallet</option>
-                        <option value="card">Credit / Debit Card</option>
+                        <option value="gcash" selected>GCash</option>
                     </select>
                 </label>
                 <label class="field"><span>Message for Seller (Optional)</span>
                     <textarea name="note" rows="4" placeholder="e.g. Please test the items before shipping or call upon arrival..."></textarea>
                 </label>
-                <p class="hint">Orders paid by GCash or card stay in Pending Payment until you pay from My Orders.</p>
+                <p class="hint">Payment method: GCash only.</p>
             </div>
             <div class="card">
                 <h2><i class="fa-solid fa-receipt"></i> Order Summary</h2>
