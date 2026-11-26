@@ -1375,13 +1375,19 @@ pages.home = async () => {
         deviceLabel.innerHTML='<span>Purchased device / part</span><select id="bookingDevice" required><option value="">Select a purchased component</option>'+unique.map(i=>`<option value="${esc(i.product_id)}">${esc(i.item_name||'Component')} — Order #${esc(i.order_id)}</option>`).join('')+'</select>';
         if(!unique.length)$('#bookingDevice').innerHTML='<option value="">No completed purchases available</option>';
     };
-    bookingType.addEventListener('change',()=>loadWarrantyChoices().catch(err=>toast(err.message,'error')));
+    const visitDate=$('#bookingVisitDate');
+    const syncVisitDate=()=>{const isWarranty=bookingType.value.toLowerCase().includes('warranty');visitDate.required=!isWarranty;visitDate.closest('label').hidden=isWarranty;};
+    visitDate.min=new Date().toLocaleDateString('en-CA');
+    bookingType.addEventListener('change',()=>{syncVisitDate();loadWarrantyChoices().catch(err=>toast(err.message,'error'));});
+    syncVisitDate();
     if(bookingType.value.toLowerCase().includes('warranty'))await loadWarrantyChoices();
     $('#bookingForm').addEventListener('submit',async e=>{
         e.preventDefault();if(!(await requireCompleteProfile()))return;
-        const type=bookingType.value,device=$('#bookingDevice').value.trim(),details=$('#bookingDetails').value.trim();
+        const type=bookingType.value,device=$('#bookingDevice').value.trim(),details=$('#bookingDetails').value.trim(),isWarranty=type.toLowerCase().includes('warranty');
+        const appointmentDate=visitDate.value;
+        if(!isWarranty&&!appointmentDate)return toast('Please choose your preferred store visit date.','error');
         try{
-            if(type.toLowerCase().includes('warranty')){
+            if(isWarranty){
                 const {data:orders,error}=await sbClient.from('orders').select('order_id,order_item(order_item_id,product_id,item_name)').eq('user_id',user.id).eq('order_status','completed');
                 if(error)throw error;
                 const item=(orders||[]).flatMap(o=>(o.order_item||[]).map(i=>({...i,order_id:o.order_id}))).find(i=>String(i.product_id)===device);
@@ -1389,10 +1395,10 @@ pages.home = async () => {
                 const {error:we}=await sbClient.from('warranty_request').insert({user_id:user.id,product_id:item.product_id,order_item_id:item.order_item_id,description:details,customer_name:user.name,customer_email:user.email,customer_phone:user.phone,receipt_code:String(item.order_id)});
                 if(we)throw we;
             }else{
-                const {error}=await sbClient.from('service_reservation').insert({user_id:user.id,service_type:type.toLowerCase().includes('consult')?'consultation':'repair',status:'requested',appointment_date:new Date().toISOString(),notes:details,device_details:device,customer_name:user.name,customer_email:user.email,customer_phone:user.phone});
+                const {error}=await sbClient.from('service_reservation').insert({user_id:user.id,service_type:type.toLowerCase().includes('consult')?'consultation':'repair',status:'requested',appointment_date:appointmentDate,notes:details,device_details:device,customer_name:user.name,customer_email:user.email,customer_phone:user.phone});
                 if(error)throw error;
             }
-            e.target.reset();toast('Request submitted successfully.');
+            e.target.reset();syncVisitDate();toast(isWarranty?'Warranty request submitted successfully.':'Service booking submitted successfully.');
         }catch(err){toast(err.message,'error');}
     });
 };
@@ -1459,6 +1465,26 @@ pages.orders = async () => {
     });
 };
 
+pages.bookings = async () => {
+    const user=guard();if(!user)return;
+    const list=$('#bookingsList');let tab='all',bookings=[];
+    const statusInfo={requested:{label:'Pending',className:'pending'},pending:{label:'Pending',className:'pending'},approved:{label:'Approved',className:'approved'},rejected:{label:'Rejected',className:'rejected'}};
+    const prettyDate=value=>{if(!value)return 'Not selected';const raw=String(value).slice(0,10);const d=new Date(raw+'T00:00:00');return Number.isNaN(d.getTime())?raw:d.toLocaleDateString('en-PH',{year:'numeric',month:'long',day:'numeric'});};
+    const render=()=>{
+        const filtered=bookings.filter(b=>tab==='all'||(tab==='pending'?['requested','pending'].includes(String(b.status).toLowerCase()):String(b.status).toLowerCase()===tab));
+        list.innerHTML=filtered.length?filtered.map(b=>{const st=statusInfo[String(b.status||'requested').toLowerCase()]||{label:b.status||'Pending',className:'pending'};return `
+          <article class="order-card booking-card">
+            <div class="order-header"><span>Booking ID: <span class="order-id">#${esc(b.reservation_id)}</span></span><span class="status ${st.className}"><i class="fa-solid ${st.className==='approved'?'fa-circle-check':st.className==='rejected'?'fa-circle-xmark':'fa-hourglass-half'}"></i> ${esc(st.label)}</span></div>
+            <div class="booking-details-grid"><div><span class="booking-label">Service</span><strong>${esc((b.service_type||'Service').replaceAll('_',' '))}</strong></div><div><span class="booking-label">Device / Part</span><strong>${esc(b.device_details||'—')}</strong></div><div><span class="booking-label">Preferred store visit</span><strong>${prettyDate(b.appointment_date)}</strong></div><div><span class="booking-label">Submitted</span><strong>${prettyDate(b.created_at)}</strong></div></div>
+            <div class="booking-description"><span class="booking-label">Your request</span><p>${esc(b.notes||'No additional details provided.')}</p></div>
+            <div class="booking-feedback"><span class="booking-label"><i class="fa-solid fa-comment-dots"></i> Staff feedback</span><p>${b.staff_feedback?esc(b.staff_feedback):'No feedback from staff yet.'}</p></div>
+          </article>`;}).join(''):'<div class="card empty-state"><i class="fa-solid fa-calendar-xmark"></i><p>No service bookings in this category yet.</p></div>';
+    };
+    const {data,error}=await sbClient.from('service_reservation').select('reservation_id,service_type,status,appointment_date,notes,device_details,staff_feedback,created_at').eq('user_id',user.id).order('created_at',{ascending:false});
+    if(error)throw error;bookings=data||[];render();
+    $('#bookingTabs').addEventListener('click',e=>{const b=e.target.closest('.tab-btn');if(!b)return;$$('#bookingTabs .tab-btn').forEach(x=>x.classList.toggle('active',x===b));tab=b.dataset.tab;render();});
+};
+
 pages.settings = async () => {
     const user=guard();if(!user)return;
     await fetchProfileAndAddress(user.id);
@@ -1523,23 +1549,46 @@ pages.staff = async () => {
             sbClient.from('service_reservation').select('*').order('created_at',{ascending:false})
         ]);
         if(we)throw we;if(se)throw se;
-        const rows=[...(w||[]).map(x=>({id:x.warranty_id,table:'warranty_request',key:'warranty_id',customer:x.customer_name||x.customer_email||'Customer',device:x.component?.name||x.product_id,type:'Warranty',details:x.description,contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),date:x.created_at,receipt:x.receipt_code,status:x.status})),
-          ...(s||[]).map(x=>({id:x.reservation_id,table:'service_reservation',key:'reservation_id',customer:x.customer_name||x.customer_email||'Customer',device:x.device_details||x.service_type,type:'Service',details:x.notes,contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),date:x.appointment_date,status:x.status}))];
-        ticketsBody.innerHTML=rows.map(x=>`<tr data-table="${x.table}" data-key="${x.key}" data-id="${x.id}"><td>#${x.id}</td><td>${esc(x.customer||'Customer')}</td><td>${esc(x.device||'')}</td><td>${x.type}</td><td><details><summary>View details</summary>${esc(x.details||'No details')}<br>Contact: ${esc(x.contact||'Not provided')}<br>Date: ${esc(x.date||'Not provided')}${x.receipt?'<br>Receipt / order: '+esc(x.receipt):''}</details></td><td>${esc(x.status)}</td><td><select class="edit-input" data-ticket-status><option value="${esc(x.status)}">${esc(x.status)}</option><option value="in_progress">In progress</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="resolved">Resolved</option></select></td></tr>`).join('')||'<tr><td colspan="7" class="table-empty">No service or warranty requests.</td></tr>';
+        const warrantyRows=(w||[]).map(x=>({kind:'warranty',id:x.warranty_id,table:'warranty_request',key:'warranty_id',customer:x.customer_name||x.customer_email||'Customer',device:x.component?.name||x.product_id,type:'Warranty',details:x.description,contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),date:x.created_at,status:x.status}));
+        const serviceRows=(s||[]).map(x=>({kind:'service',id:x.reservation_id,table:'service_reservation',key:'reservation_id',customer:x.customer_name||x.customer_email||'Customer',device:x.device_details||x.service_type,type:'Service',details:x.notes,contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),date:x.appointment_date,status:String(x.status||'requested').toLowerCase(),feedback:x.staff_feedback||''}));
+        const rows=[...serviceRows,...warrantyRows];
+        ticketsBody.innerHTML=rows.map(x=>{
+            if(x.kind==='service'){
+                const final=['approved','rejected'].includes(x.status),label=x.status==='requested'?'Pending':x.status.charAt(0).toUpperCase()+x.status.slice(1),cls=x.status==='approved'?'approved':x.status==='rejected'?'rejected':'pending';
+                const actions=final?'<span class="stock">Decision locked</span>':'<button class="btn btn-sm btn-ok" data-service-decision="approved">Approve</button><button class="btn btn-sm btn-outline danger" data-service-decision="rejected">Reject</button>';
+                return `<tr data-kind="service" data-id="${esc(x.id)}"><td>#${esc(x.id)}</td><td>${esc(x.customer)}</td><td>${esc(x.device||'')}</td><td>Service</td><td><details><summary>View details</summary>${esc(x.details||'No details')}<br>Contact: ${esc(x.contact||'Not provided')}</details></td><td><strong>${prettyBookingDate(x.date)}</strong></td><td><span class="status ${cls}">${esc(label)}</span></td><td><div class="feedback-editor"><textarea class="edit-input" data-feedback rows="2" maxlength="1000" placeholder="Write feedback for the customer">${esc(x.feedback)}</textarea><button class="btn btn-sm btn-soft" data-save-feedback>Save feedback</button></div></td><td class="actions">${actions}${final?'<button class="btn btn-sm btn-danger" data-delete-booking>Delete</button>':''}</td></tr>`;
+            }
+            return `<tr data-kind="warranty" data-table="warranty_request" data-key="warranty_id" data-id="${esc(x.id)}"><td>#${esc(x.id)}</td><td>${esc(x.customer)}</td><td>${esc(x.device||'')}</td><td>Warranty</td><td><details><summary>View details</summary>${esc(x.details||'No details')}<br>Contact: ${esc(x.contact||'Not provided')}</details></td><td>${prettyBookingDate(x.date)}</td><td>${esc(x.status)}</td><td>—</td><td><select class="edit-input" data-ticket-status><option value="${esc(x.status)}">${esc(x.status)}</option><option value="in_progress">In progress</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="resolved">Resolved</option></select></td></tr>`;
+        }).join('')||'<tr><td colspan="9" class="table-empty">No service or warranty requests.</td></tr>';
     };
-    // Keep the order queue and service queue independent from inventory.
-    load().catch(err=>{
-        console.error('Staff order queue:',err);
-        tbody.innerHTML=`<tr><td colspan="8" class="table-empty">${esc(err.message||'Unable to load orders.')}</td></tr>`;
-    });
-    loadStaffTickets().catch(err=>{
-        console.error('Staff service queue:',err);
-        ticketsBody.innerHTML=`<tr><td colspan="7" class="table-empty">${esc(err.message||'Unable to load service requests.')}</td></tr>`;
+    const prettyBookingDate=value=>{if(!value)return 'Not provided';const raw=String(value).slice(0,10);const d=new Date(raw+'T00:00:00');return Number.isNaN(d.getTime())?raw:d.toLocaleDateString('en-PH',{year:'numeric',month:'short',day:'numeric'});};
+    load().catch(err=>{console.error('Staff order queue:',err);tbody.innerHTML=`<tr><td colspan="8" class="table-empty">${esc(err.message||'Unable to load orders.')}</td></tr>`;});
+    loadStaffTickets().catch(err=>{console.error('Staff service queue:',err);ticketsBody.innerHTML=`<tr><td colspan="9" class="table-empty">${esc(err.message||'Unable to load service requests.')}</td></tr>`;});
+    ticketsBody.addEventListener('click',async e=>{
+        const row=e.target.closest('tr[data-id]');if(!row)return;
+        const decision=e.target.closest('[data-service-decision]');
+        if(decision){
+            const next=decision.dataset.serviceDecision;
+            if(!confirm(`Are you sure you want to ${next} this booking? This decision cannot be changed.`))return;
+            const {data,error}=await sbClient.from('service_reservation').update({status:next}).eq('reservation_id',row.dataset.id).eq('status','requested').select('reservation_id').maybeSingle();
+            if(error)return toast(error.message,'error');if(!data)return toast('This booking has already been decided. Refreshing the list.','error');
+            await loadStaffTickets();toast(`Booking ${next}. The decision is now locked.`);return;
+        }
+        if(e.target.closest('[data-save-feedback]')){
+            const feedback=$('[data-feedback]',row).value.trim();
+            const {error}=await sbClient.from('service_reservation').update({staff_feedback:feedback}).eq('reservation_id',row.dataset.id);
+            if(error)return toast(error.message,'error');toast('Feedback saved for the customer.');return;
+        }
+        if(e.target.closest('[data-delete-booking]')){
+            if(!confirm('Delete this finalized booking? This cannot be undone.'))return;
+            const {error}=await sbClient.from('service_reservation').delete().eq('reservation_id',row.dataset.id).in('status',['approved','rejected']);
+            if(error)return toast(error.message,'error');await loadStaffTickets();toast('Booking deleted.');
+        }
     });
     ticketsBody.addEventListener('change',async e=>{
         if(!e.target.matches('[data-ticket-status]'))return;
-        const row=e.target.closest('tr'),{error}=await sbClient.from(row.dataset.table).update({status:e.target.value}).eq(row.dataset.key,row.dataset.id);
-        if(error)return toast(error.message,'error');toast('Request status updated.');
+        const row=e.target.closest('tr'),{error}=await sbClient.from('warranty_request').update({status:e.target.value}).eq('warranty_id',row.dataset.id);
+        if(error)return toast(error.message,'error');toast('Warranty request status updated.');
     });
     tbody.addEventListener('click',async e=>{
         const row=e.target.closest('tr[data-id]');if(!row)return;
