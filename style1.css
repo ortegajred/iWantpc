@@ -383,3 +383,18 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.65); backdrop-filter: blur(
 .order-detail-row td { background: rgba(255,255,255,.035); color: var(--soft); line-height: 1.8; padding: 14px; }
 .order-detail-row ul { margin: 6px 0 6px 22px; }
 .sold-count { margin: 7px 0 0; }
+
+/* ---------- Service booking history and staff feedback ---------- */
+.booking-card { display: block; }
+.booking-details-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; padding: 4px 0 16px; }
+.booking-details-grid > div { display: flex; flex-direction: column; gap: 5px; }
+.booking-label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.booking-details-grid strong { color: #fff; font-size: 14px; font-weight: 600; }
+.booking-description, .booking-feedback { padding: 14px 0; border-top: 1px solid rgba(255,255,255,.09); }
+.booking-description p, .booking-feedback p { color: var(--soft); font-size: 14px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.booking-feedback { padding: 14px; margin-top: 8px; border: 1px solid rgba(56,189,248,.2); border-radius: 10px; background: rgba(56,189,248,.06); }
+.feedback-editor { min-width: 190px; display: flex; flex-direction: column; gap: 8px; }
+.feedback-editor textarea { min-width: 180px; width: 100%; color: #fff; background: rgba(255,255,255,.07); border: 1px solid var(--line); border-radius: 8px; padding: 8px; resize: vertical; }
+#staffTicketsBody .actions { min-width: 190px; }
+#staffTicketsBody .actions .btn { margin: 3px; }
+@media (max-width: 640px) { .booking-details-grid { grid-template-columns: 1fr; } }
