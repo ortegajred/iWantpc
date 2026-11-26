@@ -1,1 +1,32 @@
 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>iWant PC - My Service Bookings</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="style1.css">
+</head>
+<body data-page="bookings">
+    <header class="navbar">
+        <div class="nav-container">
+            <a href="home.html" class="brand-logo"><img src="iwantpc1.jpg" alt="iWant PC logo" class="nav-logo"></a>
+            <div class="page-title"><i class="fa-solid fa-calendar-check"></i> My Service Bookings</div>
+        </div>
+    </header>
+    <main class="page page-md">
+        <a href="home.html" class="back-link"><i class="fa-solid fa-arrow-left"></i> Back to Store</a>
+        <div class="order-tabs" id="bookingTabs">
+            <button class="tab-btn active" data-tab="all">All</button>
+            <button class="tab-btn" data-tab="pending">Pending</button>
+            <button class="tab-btn" data-tab="approved">Approved</button>
+            <button class="tab-btn" data-tab="rejected">Rejected</button>
+        </div>
+        <div class="orders-list" id="bookingsList"></div>
+    </main>
+    <footer id="footer"></footer>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="script.js"></script>
+</body>
+</html>
