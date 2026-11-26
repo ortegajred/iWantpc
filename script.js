@@ -1124,7 +1124,31 @@ const sbClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE
     auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
 });
 let AUTH_USER = null;
+
 let AUTH_PROFILE = null;
+async function logAudit(action, details = {}) {
+    if (!AUTH_USER?.id) return;
+    try {
+        const {error}=await sbClient.from('audit_logs').insert({actor_user_id:AUTH_USER.id,actor_name:AUTH_USER.name||AUTH_USER.username||AUTH_USER.email,actor_email:AUTH_USER.email,actor_role:AUTH_USER.role,action:String(action).slice(0,120),details});
+        if(error) console.warn('Activity log not saved:',error.message);
+    } catch(err){console.warn('Activity log not saved:',err.message);}
+}
+function enableStaffActivityTracking(){
+    if(document.documentElement.dataset.activityTracking==='on')return;
+    document.documentElement.dataset.activityTracking='on';
+    document.addEventListener('click',e=>{
+        if(!['staff','admin'].includes(AUTH_USER?.role))return;
+        const el=e.target.closest('button,a,[role="button"]'); if(!el||el.closest('#activityLogBody'))return;
+        const label=(el.innerText||el.getAttribute('aria-label')||el.title||el.id||'interactive control').trim().replace(/\s+/g,' ').slice(0,160);
+        logAudit('Clicked: '+label,{page:document.body.dataset.page,element_id:el.id||null});
+    },true);
+    document.addEventListener('change',e=>{
+        if(!['staff','admin'].includes(AUTH_USER?.role))return;
+        const el=e.target;if(!el.matches('select,input[type="checkbox"],input[type="date"]'))return;
+        logAudit('Changed: '+(el.getAttribute('aria-label')||el.name||el.id||'field'),{page:document.body.dataset.page,value:String(el.value||'').slice(0,100)});
+    },true);
+}
+
 
 function currentUser() { return AUTH_USER; }
 function guard(roles) {
@@ -1307,6 +1331,7 @@ pages.login = () => {
             if (error) throw error;
             await loadAuthUser();
             if (!AUTH_USER) throw new Error('Your account profile is not ready. Contact support.');
+            await logAudit('User login', {method:'password'});
             location.replace(homeFor(AUTH_USER.role));
         } catch(err) { formMessage(err.message || 'Unable to sign in.'); btn.disabled=false; }
     });
@@ -1362,6 +1387,7 @@ pages.home = async () => {
     });
     $$('[data-prefill]').forEach(b=>b.addEventListener('click',()=>$('#bookingType').value=b.dataset.prefill));
     const bookingType=$('#bookingType'), originalDeviceInput=$('#bookingDevice').outerHTML;
+    const bookingDateInput=$('#bookingDate'); if(bookingDateInput)bookingDateInput.min=new Date().toISOString().slice(0,10);
     const deviceLabel=$('#bookingDevice').closest('label');
     const loadWarrantyChoices=async()=>{
         if(!bookingType.value.toLowerCase().includes('warranty')){
@@ -1380,16 +1406,18 @@ pages.home = async () => {
     $('#bookingForm').addEventListener('submit',async e=>{
         e.preventDefault();if(!(await requireCompleteProfile()))return;
         const type=bookingType.value,device=$('#bookingDevice').value.trim(),details=$('#bookingDetails').value.trim();
+        const appointmentDate=$('#bookingDate')?.value;
+        if(!appointmentDate)return toast('Please choose the date you plan to visit the store.','error');
         try{
             if(type.toLowerCase().includes('warranty')){
                 const {data:orders,error}=await sbClient.from('orders').select('order_id,order_item(order_item_id,product_id,item_name)').eq('user_id',user.id).eq('order_status','completed');
                 if(error)throw error;
                 const item=(orders||[]).flatMap(o=>(o.order_item||[]).map(i=>({...i,order_id:o.order_id}))).find(i=>String(i.product_id)===device);
                 if(!item)throw new Error('Warranty claims are accepted only for components in your completed purchases.');
-                const {error:we}=await sbClient.from('warranty_request').insert({user_id:user.id,product_id:item.product_id,order_item_id:item.order_item_id,description:details,customer_name:user.name,customer_email:user.email,customer_phone:user.phone,receipt_code:String(item.order_id)});
+                const {error:we}=await sbClient.from('warranty_request').insert({user_id:user.id,product_id:item.product_id,order_item_id:item.order_item_id,description:details,customer_name:user.name,customer_email:user.email,customer_phone:user.phone,receipt_code:String(item.order_id),appointment_date:appointmentDate});
                 if(we)throw we;
             }else{
-                const {error}=await sbClient.from('service_reservation').insert({user_id:user.id,service_type:type.toLowerCase().includes('consult')?'consultation':'repair',status:'requested',appointment_date:new Date().toISOString(),notes:details,device_details:device,customer_name:user.name,customer_email:user.email,customer_phone:user.phone});
+                const {error}=await sbClient.from('service_reservation').insert({user_id:user.id,service_type:type.toLowerCase().includes('consult')?'consultation':'repair',status:'pending',appointment_date:appointmentDate,notes:details,device_details:device,customer_name:user.name,customer_email:user.email,customer_phone:user.phone});
                 if(error)throw error;
             }
             e.target.reset();toast('Request submitted successfully.');
@@ -1459,6 +1487,21 @@ pages.orders = async () => {
     });
 };
 
+pages.mybookings = async () => {
+    const user=guard();if(!user)return;
+    const body=$('#myBookingsList');
+    const [{data:w,error:we},{data:s,error:se}]=await Promise.all([
+        sbClient.from('warranty_request').select('*,component:component!warranty_request_product_id_fkey(name)').eq('user_id',user.id).order('created_at',{ascending:false}),
+        sbClient.from('service_reservation').select('*').eq('user_id',user.id).order('created_at',{ascending:false})
+    ]);
+    if(we)throw we;if(se)throw se;
+    const rows=[...(w||[]).map(x=>({id:x.warranty_id,type:'Warranty claim',device:x.component?.name||'Purchased component',date:x.appointment_date,status:x.status,details:x.description,feedback:x.staff_feedback})),
+      ...(s||[]).map(x=>({id:x.reservation_id,type:x.service_type==='consultation'?'PC Build Consultation':'Repair / Diagnostics',device:x.device_details,date:x.appointment_date,status:x.status,details:x.notes,feedback:x.staff_feedback}))];
+    body.innerHTML=rows.length?rows.map(x=>`<article class="card booking-card"><div class="order-header"><strong>${esc(x.type)} #${esc(x.id)}</strong><span class="status">${esc(x.status||'pending')}</span></div>
+    <p><strong>Device / part:</strong> ${esc(x.device||'—')}</p><p><strong>Requested store visit:</strong> ${esc(x.date||'Not specified')}</p><p><strong>Request details:</strong> ${esc(x.details||'—')}</p>
+    <div class="booking-feedback"><strong>Staff feedback</strong><p>${esc(x.feedback||'No staff feedback yet.')}</p></div></article>`).join(''):'<div class="card empty-state"><p>You have no service or warranty bookings yet.</p><a class="btn btn-primary" href="home.html#services-booking">Book a service</a></div>';
+};
+
 pages.settings = async () => {
     const user=guard();if(!user)return;
     await fetchProfileAndAddress(user.id);
@@ -1516,6 +1559,7 @@ pages.staff = async () => {
     // Initialize inventory independently: an order/ticket query must never prevent
     // staff from viewing or managing components.
     setupInventory($('#inventoryBody'),{addButton:$('#addProductBtn')});
+    enableStaffActivityTracking();
     const ticketsBody=$('#staffTicketsBody');
     const loadStaffTickets=async()=>{
         const [{data:w,error:we},{data:s,error:se}]=await Promise.all([
@@ -1523,23 +1567,25 @@ pages.staff = async () => {
             sbClient.from('service_reservation').select('*').order('created_at',{ascending:false})
         ]);
         if(we)throw we;if(se)throw se;
-        const rows=[...(w||[]).map(x=>({id:x.warranty_id,table:'warranty_request',key:'warranty_id',customer:x.customer_name||x.customer_email||'Customer',device:x.component?.name||x.product_id,type:'Warranty',details:x.description,contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),date:x.created_at,receipt:x.receipt_code,status:x.status})),
-          ...(s||[]).map(x=>({id:x.reservation_id,table:'service_reservation',key:'reservation_id',customer:x.customer_name||x.customer_email||'Customer',device:x.device_details||x.service_type,type:'Service',details:x.notes,contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),date:x.appointment_date,status:x.status}))];
-        ticketsBody.innerHTML=rows.map(x=>`<tr data-table="${x.table}" data-key="${x.key}" data-id="${x.id}"><td>#${x.id}</td><td>${esc(x.customer||'Customer')}</td><td>${esc(x.device||'')}</td><td>${x.type}</td><td><details><summary>View details</summary>${esc(x.details||'No details')}<br>Contact: ${esc(x.contact||'Not provided')}<br>Date: ${esc(x.date||'Not provided')}${x.receipt?'<br>Receipt / order: '+esc(x.receipt):''}</details></td><td>${esc(x.status)}</td><td><select class="edit-input" data-ticket-status><option value="${esc(x.status)}">${esc(x.status)}</option><option value="in_progress">In progress</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="resolved">Resolved</option></select></td></tr>`).join('')||'<tr><td colspan="7" class="table-empty">No service or warranty requests.</td></tr>';
+        const rows=[...(w||[]).map(x=>({id:x.warranty_id,table:'warranty_request',key:'warranty_id',customer:x.customer_name||x.customer_email||'Customer',device:x.component?.name||x.product_id,type:'Warranty',details:x.description,contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),date:x.appointment_date||x.created_at,feedback:x.staff_feedback||'',status:x.status})),
+        ...(s||[]).map(x=>({id:x.reservation_id,table:'service_reservation',key:'reservation_id',customer:x.customer_name||x.customer_email||'Customer',device:x.device_details||x.service_type,type:'Service',details:x.notes,contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),date:x.appointment_date,feedback:x.staff_feedback||'',status:x.status}))];
+        ticketsBody.innerHTML=rows.map(x=>`<tr data-table="${x.table}" data-key="${x.key}" data-id="${x.id}">
+        <td>#${x.id}</td><td>${esc(x.customer)}</td><td>${esc(x.device||'')}</td><td>${x.type}</td>
+        <td><details><summary>View details</summary>${esc(x.details||'No details')}<br>Contact: ${esc(x.contact||'Not provided')}</details></td>
+        <td>${esc(x.date||'Not selected')}</td><td><span class="status">${esc(x.status||'pending')}</span></td>
+        <td><textarea class="edit-input" data-staff-feedback rows="2" placeholder="Required when rejecting">${esc(x.feedback)}</textarea></td>
+        <td><button class="btn btn-sm btn-ok" data-ticket-decision="approved">Approve</button> <button class="btn btn-sm btn-danger" data-ticket-decision="rejected">Reject</button></td></tr>`).join('')||'<tr><td colspan="9" class="table-empty">No service or warranty requests.</td></tr>';
     };
-    // Keep the order queue and service queue independent from inventory.
-    load().catch(err=>{
-        console.error('Staff order queue:',err);
-        tbody.innerHTML=`<tr><td colspan="8" class="table-empty">${esc(err.message||'Unable to load orders.')}</td></tr>`;
-    });
-    loadStaffTickets().catch(err=>{
-        console.error('Staff service queue:',err);
-        ticketsBody.innerHTML=`<tr><td colspan="7" class="table-empty">${esc(err.message||'Unable to load service requests.')}</td></tr>`;
-    });
-    ticketsBody.addEventListener('change',async e=>{
-        if(!e.target.matches('[data-ticket-status]'))return;
-        const row=e.target.closest('tr'),{error}=await sbClient.from(row.dataset.table).update({status:e.target.value}).eq(row.dataset.key,row.dataset.id);
-        if(error)return toast(error.message,'error');toast('Request status updated.');
+    loadStaffTickets().catch(err=>{console.error('Staff service queue:',err);ticketsBody.innerHTML=`<tr><td colspan="9" class="table-empty">${esc(err.message||'Unable to load service requests.')}</td></tr>`;});
+    ticketsBody.addEventListener('click',async e=>{
+        const btn=e.target.closest('[data-ticket-decision]');if(!btn)return;
+        const row=btn.closest('tr'),status=btn.dataset.ticketDecision,feedback=row.querySelector('[data-staff-feedback]').value.trim();
+        if(status==='rejected'&&!feedback)return toast('Please explain why this request is rejected.','error');
+        if(!confirm(`Are you sure you want to ${status} this request?`))return;
+        const {error}=await sbClient.from(row.dataset.table).update({status,staff_feedback:feedback||null,reviewed_by:AUTH_USER.id,reviewed_at:new Date().toISOString()}).eq(row.dataset.key,row.dataset.id);
+        if(error)return toast(error.message,'error');
+        await logAudit(status==='approved'?'Approved service/warranty request':'Rejected service/warranty request',{request_table:row.dataset.table,request_id:row.dataset.id,feedback});
+        await loadStaffTickets();toast(`Request ${status}.`);
     });
     tbody.addEventListener('click',async e=>{
         const row=e.target.closest('tr[data-id]');if(!row)return;
@@ -1552,6 +1598,7 @@ pages.staff = async () => {
             if(!next)return toast('This order cannot be moved to the next shipping stage.','error');
             const {error}=await sbClient.from('orders').update({order_status:next,delivery_date:date,shipped_at:next==='toreceive'?new Date().toISOString():null}).eq('order_id',row.dataset.id);
             if(error)return toast(error.message,'error');
+            await logAudit('Updated order status',{order_id:row.dataset.id,status:next,delivery_date:date});
             await load();toast(next==='toship'?'Order accepted for fulfillment.':'Order marked as shipped.');
         }
     });
@@ -1572,6 +1619,7 @@ pages.staff = async () => {
             const {data:{publicUrl}}=sbClient.storage.from(IMAGE_BUCKET).getPublicUrl(path);
             const {error}=await sbClient.from('orders').update({order_status:'completed',proof_image_url:publicUrl,received_at:new Date().toISOString()}).eq('order_id',completingOrderId);
             if(error)throw error;
+            await logAudit('Completed customer order',{order_id:completingOrderId,delivery_proof:publicUrl});
             completingOrderId=null;proofInput.value='';await load();toast('Order completed and delivery proof saved.');
         }catch(err){toast(err.message||'Could not save delivery proof.','error');}
     });
@@ -1611,6 +1659,7 @@ function makeDashboardTablesCollapsible(root, labels) {
 
 pages.admin = async () => {
     const admin=guard(['admin']);if(!admin)return;
+    enableStaffActivityTracking();
     const usersBody=$('#usersBody');
     const loadUsers=async()=>{
         const {data,error}=await sbClient.from('users').select('user_id,username,email,role,user_role,is_active,name').order('created_at',{ascending:false});
@@ -1663,7 +1712,13 @@ pages.admin = async () => {
         console.error('Admin order metrics:',err);
         $('#mOrders').textContent='—';$('#mRevenue').textContent='—';
     });
-    makeDashboardTablesCollapsible(document,[['main .card:nth-of-type(1)','Product inventory'],['main .card:nth-of-type(2)','User accounts']]);
+    const auditBody=$('#activityLogBody');
+    if(auditBody){
+        const {data,error}=await sbClient.from('audit_logs').select('created_at,actor_name,actor_email,actor_role,action,details').order('created_at',{ascending:false}).limit(200);
+        if(error)auditBody.innerHTML=`<tr><td colspan="5" class="table-empty">${esc(error.message)}</td></tr>`;
+        else auditBody.innerHTML=(data||[]).map(x=>`<tr><td>${new Date(x.created_at).toLocaleString()}</td><td>${esc(x.actor_name||x.actor_email||'Staff')}</td><td>${esc(x.actor_role||'')}</td><td>${esc(x.action)}</td><td>${esc(JSON.stringify(x.details||{}))}</td></tr>`).join('')||'<tr><td colspan="5" class="table-empty">No activity recorded yet.</td></tr>';
+    }
+    makeDashboardTablesCollapsible(document,[['main .card:nth-of-type(1)','Product inventory'],['main .card:nth-of-type(2)','User accounts'],['main .card:nth-of-type(3)','Staff activity log']]);
 };
 
 /* End Supabase integration overrides */
