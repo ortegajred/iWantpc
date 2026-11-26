@@ -1399,7 +1399,7 @@ pages.home = async () => {
                 const {error}=await sbClient.from('service_reservation').insert({user_id:user.id,service_type:type.toLowerCase().includes('consult')?'consultation':'repair',status:'requested',appointment_date:appointmentDate,notes:details,device_details:device,customer_name:user.name,customer_email:user.email,customer_phone:user.phone});
                 if(error)throw error;
             }
-            e.target.reset();syncVisitDate();toast(isWarranty?'Warranty request submitted successfully.':'Service booking submitted successfully.');
+            e.target.reset();toast(isWarranty?'Warranty request submitted successfully.':'Service booking submitted successfully.');
         }catch(err){toast(err.message,'error');}
     });
 };
