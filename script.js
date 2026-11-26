@@ -1376,23 +1376,24 @@ pages.home = async () => {
         if(!unique.length)$('#bookingDevice').innerHTML='<option value="">No completed purchases available</option>';
     };
     const visitDate=$('#bookingVisitDate');
-    const syncVisitDate=()=>{const isWarranty=bookingType.value.toLowerCase().includes('warranty');visitDate.required=!isWarranty;visitDate.closest('label').hidden=isWarranty;};
+    // The preferred store visit date applies to both service bookings and warranty claims.
+    visitDate.required=true;
+    visitDate.closest('label').hidden=false;
     visitDate.min=new Date().toLocaleDateString('en-CA');
-    bookingType.addEventListener('change',()=>{syncVisitDate();loadWarrantyChoices().catch(err=>toast(err.message,'error'));});
-    syncVisitDate();
+    bookingType.addEventListener('change',()=>loadWarrantyChoices().catch(err=>toast(err.message,'error')));
     if(bookingType.value.toLowerCase().includes('warranty'))await loadWarrantyChoices();
     $('#bookingForm').addEventListener('submit',async e=>{
         e.preventDefault();if(!(await requireCompleteProfile()))return;
         const type=bookingType.value,device=$('#bookingDevice').value.trim(),details=$('#bookingDetails').value.trim(),isWarranty=type.toLowerCase().includes('warranty');
         const appointmentDate=visitDate.value;
-        if(!isWarranty&&!appointmentDate)return toast('Please choose your preferred store visit date.','error');
+        if(!appointmentDate)return toast('Please choose your preferred store visit date.','error');
         try{
             if(isWarranty){
                 const {data:orders,error}=await sbClient.from('orders').select('order_id,order_item(order_item_id,product_id,item_name)').eq('user_id',user.id).eq('order_status','completed');
                 if(error)throw error;
                 const item=(orders||[]).flatMap(o=>(o.order_item||[]).map(i=>({...i,order_id:o.order_id}))).find(i=>String(i.product_id)===device);
                 if(!item)throw new Error('Warranty claims are accepted only for components in your completed purchases.');
-                const {error:we}=await sbClient.from('warranty_request').insert({user_id:user.id,product_id:item.product_id,order_item_id:item.order_item_id,description:details,customer_name:user.name,customer_email:user.email,customer_phone:user.phone,receipt_code:String(item.order_id)});
+                const {error:we}=await sbClient.from('warranty_request').insert({user_id:user.id,product_id:item.product_id,order_item_id:item.order_item_id,description:details,appointment_date:appointmentDate,customer_name:user.name,customer_email:user.email,customer_phone:user.phone,receipt_code:String(item.order_id)});
                 if(we)throw we;
             }else{
                 const {error}=await sbClient.from('service_reservation').insert({user_id:user.id,service_type:type.toLowerCase().includes('consult')?'consultation':'repair',status:'requested',appointment_date:appointmentDate,notes:details,device_details:device,customer_name:user.name,customer_email:user.email,customer_phone:user.phone});
@@ -1549,14 +1550,14 @@ pages.staff = async () => {
             sbClient.from('service_reservation').select('*').order('created_at',{ascending:false})
         ]);
         if(we)throw we;if(se)throw se;
-        const warrantyRows=(w||[]).map(x=>({kind:'warranty',id:x.warranty_id,table:'warranty_request',key:'warranty_id',customer:x.customer_name||x.customer_email||'Customer',device:x.component?.name||x.product_id,type:'Warranty',details:x.description,contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),date:x.created_at,status:x.status}));
+        const warrantyRows=(w||[]).map(x=>({kind:'warranty',id:x.warranty_id,table:'warranty_request',key:'warranty_id',customer:x.customer_name||x.customer_email||'Customer',device:x.component?.name||x.product_id,type:'Warranty',details:x.description,contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),date:x.appointment_date||x.created_at,status:x.status}));
         const serviceRows=(s||[]).map(x=>({kind:'service',id:x.reservation_id,table:'service_reservation',key:'reservation_id',customer:x.customer_name||x.customer_email||'Customer',device:x.device_details||x.service_type,type:'Service',details:x.notes,contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),date:x.appointment_date,status:String(x.status||'requested').toLowerCase(),feedback:x.staff_feedback||''}));
         const rows=[...serviceRows,...warrantyRows];
         ticketsBody.innerHTML=rows.map(x=>{
             if(x.kind==='service'){
                 const final=['approved','rejected'].includes(x.status),label=x.status==='requested'?'Pending':x.status.charAt(0).toUpperCase()+x.status.slice(1),cls=x.status==='approved'?'approved':x.status==='rejected'?'rejected':'pending';
                 const actions=final?'<span class="stock">Decision locked</span>':'<button class="btn btn-sm btn-ok" data-service-decision="approved">Approve</button><button class="btn btn-sm btn-outline danger" data-service-decision="rejected">Reject</button>';
-                return `<tr data-kind="service" data-id="${esc(x.id)}"><td>#${esc(x.id)}</td><td>${esc(x.customer)}</td><td>${esc(x.device||'')}</td><td>Service</td><td><details><summary>View details</summary>${esc(x.details||'No details')}<br>Contact: ${esc(x.contact||'Not provided')}</details></td><td><strong>${prettyBookingDate(x.date)}</strong></td><td><span class="status ${cls}">${esc(label)}</span></td><td><div class="feedback-editor"><textarea class="edit-input" data-feedback rows="2" maxlength="1000" placeholder="Write feedback for the customer">${esc(x.feedback)}</textarea><button class="btn btn-sm btn-soft" data-save-feedback>Save feedback</button></div></td><td class="actions">${actions}${final?'<button class="btn btn-sm btn-danger" data-delete-booking>Delete</button>':''}</td></tr>`;
+                return `<tr data-kind="service" data-id="${esc(x.id)}"><td>#${esc(x.id)}</td><td>${esc(x.customer)}</td><td>${esc(x.device||'')}</td><td>Service</td><td><details><summary>View details</summary>${esc(x.details||'No details')}<br>Contact: ${esc(x.contact||'Not provided')}</details></td><td><strong>${prettyBookingDate(x.date)}</strong></td><td><span class="status ${cls}">${esc(label)}</span></td><td><div class="feedback-editor"><textarea class="edit-input" data-feedback rows="2" maxlength="1000" placeholder="Required before approving or rejecting" ${final?'readonly':''}>${esc(x.feedback)}</textarea>${final?'<small class="stock">Feedback locked</small>':''}</div></td><td class="actions">${actions}${final?'<button class="btn btn-sm btn-danger" data-delete-booking>Delete</button>':''}</td></tr>`;
             }
             return `<tr data-kind="warranty" data-table="warranty_request" data-key="warranty_id" data-id="${esc(x.id)}"><td>#${esc(x.id)}</td><td>${esc(x.customer)}</td><td>${esc(x.device||'')}</td><td>Warranty</td><td><details><summary>View details</summary>${esc(x.details||'No details')}<br>Contact: ${esc(x.contact||'Not provided')}</details></td><td>${prettyBookingDate(x.date)}</td><td>${esc(x.status)}</td><td>—</td><td><select class="edit-input" data-ticket-status><option value="${esc(x.status)}">${esc(x.status)}</option><option value="in_progress">In progress</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="resolved">Resolved</option></select></td></tr>`;
         }).join('')||'<tr><td colspan="9" class="table-empty">No service or warranty requests.</td></tr>';
@@ -1569,15 +1570,18 @@ pages.staff = async () => {
         const decision=e.target.closest('[data-service-decision]');
         if(decision){
             const next=decision.dataset.serviceDecision;
-            if(!confirm(`Are you sure you want to ${next} this booking? This decision cannot be changed.`))return;
-            const {data,error}=await sbClient.from('service_reservation').update({status:next}).eq('reservation_id',row.dataset.id).eq('status','requested').select('reservation_id').maybeSingle();
-            if(error)return toast(error.message,'error');if(!data)return toast('This booking has already been decided. Refreshing the list.','error');
-            await loadStaffTickets();toast(`Booking ${next}. The decision is now locked.`);return;
-        }
-        if(e.target.closest('[data-save-feedback]')){
-            const feedback=$('[data-feedback]',row).value.trim();
-            const {error}=await sbClient.from('service_reservation').update({staff_feedback:feedback}).eq('reservation_id',row.dataset.id);
-            if(error)return toast(error.message,'error');toast('Feedback saved for the customer.');return;
+            const feedback=$('[data-feedback]',row)?.value.trim()||'';
+            if(!feedback)return toast('Please enter staff feedback before approving or rejecting this booking.','error');
+            if(!confirm(`Are you sure you want to ${next} this booking? The decision and feedback cannot be changed.`))return;
+            const {data,error}=await sbClient.from('service_reservation')
+                .update({status:next,staff_feedback:feedback})
+                .eq('reservation_id',row.dataset.id)
+                .eq('status','requested')
+                .select('reservation_id')
+                .maybeSingle();
+            if(error)return toast(error.message,'error');
+            if(!data)return toast('This booking has already been decided. Refreshing the list.','error');
+            await loadStaffTickets();toast(`Booking ${next}. The decision and feedback are now locked.`);return;
         }
         if(e.target.closest('[data-delete-booking]')){
             if(!confirm('Delete this finalized booking? This cannot be undone.'))return;
