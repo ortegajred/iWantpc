@@ -1393,7 +1393,7 @@ pages.home = async () => {
                 if(error)throw error;
                 const item=(orders||[]).flatMap(o=>(o.order_item||[]).map(i=>({...i,order_id:o.order_id}))).find(i=>String(i.product_id)===device);
                 if(!item)throw new Error('Warranty claims are accepted only for components in your completed purchases.');
-                const {error:we}=await sbClient.from('warranty_request').insert({user_id:user.id,product_id:item.product_id,order_item_id:item.order_item_id,description:details,appointment_date:appointmentDate,customer_name:user.name,customer_email:user.email,customer_phone:user.phone,receipt_code:String(item.order_id)});
+                const {error:we}=await sbClient.from('warranty_request').insert({user_id:user.id,product_id:item.product_id,order_item_id:item.order_item_id,description:details,appointment_date:appointmentDate,status:'submitted',customer_name:user.name,customer_email:user.email,customer_phone:user.phone,receipt_code:String(item.order_id)});
                 if(we)throw we;
             }else{
                 const {error}=await sbClient.from('service_reservation').insert({user_id:user.id,service_type:type.toLowerCase().includes('consult')?'consultation':'repair',status:'requested',appointment_date:appointmentDate,notes:details,device_details:device,customer_name:user.name,customer_email:user.email,customer_phone:user.phone});
@@ -1559,7 +1559,7 @@ pages.staff = async () => {
                 const actions=final?'<span class="stock">Decision locked</span>':'<button class="btn btn-sm btn-ok" data-service-decision="approved">Approve</button><button class="btn btn-sm btn-outline danger" data-service-decision="rejected">Reject</button>';
                 return `<tr data-kind="service" data-id="${esc(x.id)}"><td>#${esc(x.id)}</td><td>${esc(x.customer)}</td><td>${esc(x.device||'')}</td><td>Service</td><td><details><summary>View details</summary>${esc(x.details||'No details')}<br>Contact: ${esc(x.contact||'Not provided')}</details></td><td><strong>${prettyBookingDate(x.date)}</strong></td><td><span class="status ${cls}">${esc(label)}</span></td><td><div class="feedback-editor"><textarea class="edit-input" data-feedback rows="2" maxlength="1000" placeholder="Required before approving or rejecting" ${final?'readonly':''}>${esc(x.feedback)}</textarea>${final?'<small class="stock">Feedback locked</small>':''}</div></td><td class="actions">${actions}${final?'<button class="btn btn-sm btn-danger" data-delete-booking>Delete</button>':''}</td></tr>`;
             }
-            return `<tr data-kind="warranty" data-table="warranty_request" data-key="warranty_id" data-id="${esc(x.id)}"><td>#${esc(x.id)}</td><td>${esc(x.customer)}</td><td>${esc(x.device||'')}</td><td>Warranty</td><td><details><summary>View details</summary>${esc(x.details||'No details')}<br>Contact: ${esc(x.contact||'Not provided')}</details></td><td>${prettyBookingDate(x.date)}</td><td>${esc(x.status)}</td><td>—</td><td><select class="edit-input" data-ticket-status><option value="${esc(x.status)}">${esc(x.status)}</option><option value="in_progress">In progress</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="resolved">Resolved</option></select></td></tr>`;
+            return `<tr data-kind="warranty" data-table="warranty_request" data-key="warranty_id" data-id="${esc(x.id)}"><td>#${esc(x.id)}</td><td>${esc(x.customer)}</td><td>${esc(x.device||'')}</td><td>Warranty</td><td><details><summary>View details</summary>${esc(x.details||'No details')}<br>Contact: ${esc(x.contact||'Not provided')}</details></td><td>${prettyBookingDate(x.date)}</td><td>${esc(x.status)}</td><td>—</td><td><select class="edit-input" data-ticket-status><option value="${esc(x.status||'submitted')}">${esc(x.status||'submitted')}</option><option value="in_progress">In progress</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="resolved">Resolved</option></select></td></tr>`;
         }).join('')||'<tr><td colspan="9" class="table-empty">No service or warranty requests.</td></tr>';
     };
     const prettyBookingDate=value=>{if(!value)return 'Not provided';const raw=String(value).slice(0,10);const d=new Date(raw+'T00:00:00');return Number.isNaN(d.getTime())?raw:d.toLocaleDateString('en-PH',{year:'numeric',month:'short',day:'numeric'});};
@@ -1591,8 +1591,12 @@ pages.staff = async () => {
     });
     ticketsBody.addEventListener('change',async e=>{
         if(!e.target.matches('[data-ticket-status]'))return;
-        const row=e.target.closest('tr'),{error}=await sbClient.from('warranty_request').update({status:e.target.value}).eq('warranty_id',row.dataset.id);
-        if(error)return toast(error.message,'error');toast('Warranty request status updated.');
+        const status=String(e.target.value||'').trim();
+        if(!status){toast('Please choose a valid warranty status.','error');await loadStaffTickets();return;}
+        const row=e.target.closest('tr');
+        const {error}=await sbClient.from('warranty_request').update({status}).eq('warranty_id',row.dataset.id);
+        if(error){toast(error.message,'error');await loadStaffTickets();return;}
+        toast('Warranty request status updated.');
     });
     tbody.addEventListener('click',async e=>{
         const row=e.target.closest('tr[data-id]');if(!row)return;
