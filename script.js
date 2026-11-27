@@ -1598,7 +1598,7 @@ pages.checkout = async () => {
 pages.orders = async () => {
     const user=guard();if(!user)return;
     const list=$('#ordersList');let tab='all',orders=[];
-    const labels={pending:'Pending',toship:'To Ship',toreceive:'To Receive',completed:'Completed',cancelled:'Cancelled'};
+    const labels={pending:'Pending Payment',toship:'To Ship',toreceive:'To Receive',completed:'Completed',cancelled:'Cancelled'};
     const render=()=>{
         const filtered=orders.filter(o=>tab==='all'||o.status===tab);
         list.innerHTML=filtered.length?filtered.map(o=>`<div class="order-card" data-id="${o.id}">
@@ -1747,26 +1747,100 @@ pages.staff = async () => {
     setupInventory($('#inventoryBody'),{addButton:$('#addProductBtn')});
     const ticketsBody=$('#staffTicketsBody');
     const loadStaffTickets=async()=>{
+        // Keep the existing database tables, but combine both request types into
+        // one staff queue and render every row with the same controls.
         const [{data:w,error:we},{data:s,error:se}]=await Promise.all([
-            sbClient.from('warranty_request').select('*,component:component!warranty_request_product_id_fkey(name)').order('created_at',{ascending:false}),
-            sbClient.from('service_reservation').select('*').order('created_at',{ascending:false})
+            sbClient.from('warranty_request')
+                .select('*,component:component!warranty_request_product_id_fkey(name)')
+                .order('created_at',{ascending:false}),
+            sbClient.from('service_reservation')
+                .select('*')
+                .order('created_at',{ascending:false})
         ]);
-        if(we)throw we;if(se)throw se;
-        const warrantyRows=(w||[]).map(x=>({kind:'warranty',id:x.warranty_id,table:'warranty_request',key:'warranty_id',customer:x.customer_name||x.customer_email||'Customer',device:x.component?.name||x.product_id,type:'Warranty',details:x.description,contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),date:x.appointment_date||x.created_at,status:x.status}));
-        const serviceRows=(s||[]).map(x=>({kind:'service',id:x.reservation_id,table:'service_reservation',key:'reservation_id',customer:x.customer_name||x.customer_email||'Customer',device:x.device_details||x.service_type,type:'Service',details:x.notes,contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),date:x.appointment_date,status:String(x.status||'requested').toLowerCase(),feedback:x.staff_feedback||''}));
-        const rows=[...serviceRows,...warrantyRows];
+        if(we)throw we;
+        if(se)throw se;
+
+        const warrantyRows=(w||[]).map(x=>({
+            kind:'warranty',
+            id:x.warranty_id,
+            customer:x.customer_name||x.customer_email||'Customer',
+            device:x.component?.name||x.product_id||'—',
+            type:'Warranty Claim',
+            details:x.description,
+            contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),
+            date:x.appointment_date||x.created_at,
+            status:String(x.status||'submitted').toLowerCase(),
+            feedback:x.staff_feedback||''
+        }));
+
+        const serviceRows=(s||[]).map(x=>({
+            kind:'service',
+            id:x.reservation_id,
+            customer:x.customer_name||x.customer_email||'Customer',
+            device:x.device_details||x.service_type||'—',
+            type:'Service',
+            details:x.notes,
+            contact:[x.customer_email,x.customer_phone].filter(Boolean).join(' / '),
+            date:x.appointment_date||x.created_at,
+            status:String(x.status||'requested').toLowerCase(),
+            feedback:x.staff_feedback||''
+        }));
+
+        const rows=[...serviceRows,...warrantyRows].sort((a,b)=>{
+            const aDate=new Date(a.date||0).getTime()||0;
+            const bDate=new Date(b.date||0).getTime()||0;
+            return bDate-aDate;
+        });
+
+        const finalStatuses=['approved','rejected','resolved'];
+        const statusLabel=status=>{
+            if(status==='requested'||status==='submitted')return 'Pending';
+            if(status==='in_progress')return 'In Progress';
+            return status ? status.charAt(0).toUpperCase()+status.slice(1) : 'Pending';
+        };
+        const statusClass=status=>{
+            if(status==='approved'||status==='resolved')return 'approved';
+            if(status==='rejected')return 'rejected';
+            return 'pending';
+        };
+
         ticketsBody.innerHTML=rows.map(x=>{
-            if(x.kind==='service'){
-                const final=['approved','rejected'].includes(x.status),label=x.status==='requested'?'Pending':x.status.charAt(0).toUpperCase()+x.status.slice(1),cls=x.status==='approved'?'approved':x.status==='rejected'?'rejected':'pending';
-                const actions=final?'<span class="stock">Decision locked</span>':'<button class="btn btn-sm btn-ok" data-service-decision="approved">Approve</button><button class="btn btn-sm btn-outline danger" data-service-decision="rejected">Reject</button>';
-                return `<tr data-kind="service" data-id="${esc(x.id)}"><td>#${esc(x.id)}</td><td>${esc(x.customer)}</td><td>${esc(x.device||'')}</td><td>Service</td><td><details><summary>View details</summary>${esc(x.details||'No details')}<br>Contact: ${esc(x.contact||'Not provided')}</details></td><td><strong>${prettyBookingDate(x.date)}</strong></td><td><span class="status ${cls}">${esc(label)}</span></td><td><div class="feedback-editor"><textarea class="edit-input" data-feedback rows="2" maxlength="1000" placeholder="Required before approving or rejecting" ${final?'readonly':''}>${esc(x.feedback)}</textarea>${final?'<small class="stock">Feedback locked</small>':''}</div></td><td class="actions">${actions}${final?'<button class="btn btn-sm btn-danger" data-delete-booking>Delete</button>':''}</td></tr>`;
-            }
-            return `<tr data-kind="warranty" data-table="warranty_request" data-key="warranty_id" data-id="${esc(x.id)}"><td>#${esc(x.id)}</td><td>${esc(x.customer)}</td><td>${esc(x.device||'')}</td><td>Warranty</td><td><details><summary>View details</summary>${esc(x.details||'No details')}<br>Contact: ${esc(x.contact||'Not provided')}</details></td><td>${prettyBookingDate(x.date)}</td><td>${esc(x.status)}</td><td>—</td><td><select class="edit-input" data-ticket-status><option value="${esc(x.status||'submitted')}">${esc(x.status||'submitted')}</option><option value="in_progress">In progress</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="resolved">Resolved</option></select></td></tr>`;
+            const final=finalStatuses.includes(x.status);
+            const ticketPrefix=x.kind==='warranty'?'WR':'SR';
+            const actions=final
+                ? `<span class="stock">Decision locked</span><button type="button" class="btn btn-sm btn-danger" data-ticket-delete>Delete</button>`
+                : `<button type="button" class="btn btn-sm btn-ok" data-ticket-decision="approved">Approve</button><button type="button" class="btn btn-sm btn-outline danger" data-ticket-decision="rejected">Reject</button>`;
+
+            return `<tr data-kind="${x.kind}" data-id="${esc(x.id)}">
+                <td><strong>${ticketPrefix}-${esc(x.id)}</strong></td>
+                <td>${esc(x.customer)}</td>
+                <td>${esc(x.device)}</td>
+                <td>${esc(x.type)}</td>
+                <td><details><summary>View details</summary>${esc(x.details||'No details')}<br>Contact: ${esc(x.contact||'Not provided')}</details></td>
+                <td><strong>${prettyBookingDate(x.date)}</strong></td>
+                <td><span class="status ${statusClass(x.status)}">${esc(statusLabel(x.status))}</span></td>
+                <td><div class="feedback-editor"><textarea class="edit-input" data-feedback rows="2" maxlength="1000" placeholder="Required before approving or rejecting" ${final?'readonly':''}>${esc(x.feedback)}</textarea>${final?'<small class="stock">Feedback locked</small>':''}</div></td>
+                <td class="actions">${actions}</td>
+            </tr>`;
         }).join('')||'<tr><td colspan="9" class="table-empty">No service or warranty requests.</td></tr>';
     };
-    const prettyBookingDate=value=>{if(!value)return 'Not provided';const raw=String(value).slice(0,10);const d=new Date(raw+'T00:00:00');return Number.isNaN(d.getTime())?raw:d.toLocaleDateString('en-PH',{year:'numeric',month:'short',day:'numeric'});};
-    load().catch(err=>{console.error('Staff order queue:',err);tbody.innerHTML=`<tr><td colspan="8" class="table-empty">${esc(err.message||'Unable to load orders.')}</td></tr>`;});
-    loadStaffTickets().catch(err=>{console.error('Staff service queue:',err);ticketsBody.innerHTML=`<tr><td colspan="9" class="table-empty">${esc(err.message||'Unable to load service requests.')}</td></tr>`;});
+
+    const prettyBookingDate=value=>{
+        if(!value)return 'Not provided';
+        const raw=String(value).slice(0,10);
+        const d=new Date(raw+'T00:00:00');
+        return Number.isNaN(d.getTime())?raw:d.toLocaleDateString('en-PH',{year:'numeric',month:'short',day:'numeric'});
+    };
+
+    load().catch(err=>{
+        console.error('Staff order queue:',err);
+        tbody.innerHTML=`<tr><td colspan="8" class="table-empty">${esc(err.message||'Unable to load orders.')}</td></tr>`;
+    });
+    loadStaffTickets().catch(err=>{
+        console.error('Staff service queue:',err);
+        ticketsBody.innerHTML=`<tr><td colspan="9" class="table-empty">${esc(err.message||'Unable to load service requests.')}</td></tr>`;
+    });
+
     $('#closePaymentProofModal')?.addEventListener('click', () => paymentProofModal.close());
     paymentProofModal?.addEventListener('click', e => {
         if (e.target === paymentProofModal) paymentProofModal.close();
@@ -1775,38 +1849,51 @@ pages.staff = async () => {
         paymentProofImage.removeAttribute('src');
         paymentProofMeta.textContent = '';
     });
+
     ticketsBody.addEventListener('click',async e=>{
-        const row=e.target.closest('tr[data-id]');if(!row)return;
-        const decision=e.target.closest('[data-service-decision]');
+        const row=e.target.closest('tr[data-kind][data-id]');
+        if(!row)return;
+
+        const isWarranty=row.dataset.kind==='warranty';
+        const table=isWarranty?'warranty_request':'service_reservation';
+        const idColumn=isWarranty?'warranty_id':'reservation_id';
+        const pendingStatuses=isWarranty?['submitted','in_progress']:['requested','in_progress'];
+
+        const decision=e.target.closest('[data-ticket-decision]');
         if(decision){
-            const next=decision.dataset.serviceDecision;
+            const next=decision.dataset.ticketDecision;
             const feedback=$('[data-feedback]',row)?.value.trim()||'';
-            if(!feedback)return toast('Please enter staff feedback before approving or rejecting this booking.','error');
-            if(!confirm(`Are you sure you want to ${next} this booking? The decision and feedback cannot be changed.`))return;
-            const {data,error}=await sbClient.from('service_reservation')
+            if(!feedback)return toast('Please enter staff feedback before approving or rejecting this request.','error');
+            if(!confirm(`Are you sure you want to ${next} this ${isWarranty?'warranty claim':'service booking'}? The decision and feedback cannot be changed.`))return;
+
+            const {data,error}=await sbClient.from(table)
                 .update({status:next,staff_feedback:feedback})
-                .eq('reservation_id',row.dataset.id)
-                .eq('status','requested')
-                .select('reservation_id')
+                .eq(idColumn,row.dataset.id)
+                .in('status',pendingStatuses)
+                .select(idColumn)
                 .maybeSingle();
+
             if(error)return toast(error.message,'error');
-            if(!data)return toast('This booking has already been decided. Refreshing the list.','error');
-            await loadStaffTickets();toast(`Booking ${next}. The decision and feedback are now locked.`);return;
+            if(!data){
+                toast('This request has already been decided. Refreshing the list.','error');
+                await loadStaffTickets();
+                return;
+            }
+            await loadStaffTickets();
+            toast(`${isWarranty?'Warranty claim':'Service booking'} ${next}. The decision and feedback are now locked.`);
+            return;
         }
-        if(e.target.closest('[data-delete-booking]')){
-            if(!confirm('Delete this finalized booking? This cannot be undone.'))return;
-            const {error}=await sbClient.from('service_reservation').delete().eq('reservation_id',row.dataset.id).in('status',['approved','rejected']);
-            if(error)return toast(error.message,'error');await loadStaffTickets();toast('Booking deleted.');
+
+        if(e.target.closest('[data-ticket-delete]')){
+            if(!confirm('Delete this finalized request? This cannot be undone.'))return;
+            const {error}=await sbClient.from(table)
+                .delete()
+                .eq(idColumn,row.dataset.id)
+                .in('status',['approved','rejected','resolved']);
+            if(error)return toast(error.message,'error');
+            await loadStaffTickets();
+            toast('Request deleted.');
         }
-    });
-    ticketsBody.addEventListener('change',async e=>{
-        if(!e.target.matches('[data-ticket-status]'))return;
-        const status=String(e.target.value||'').trim();
-        if(!status){toast('Please choose a valid warranty status.','error');await loadStaffTickets();return;}
-        const row=e.target.closest('tr');
-        const {error}=await sbClient.from('warranty_request').update({status}).eq('warranty_id',row.dataset.id);
-        if(error){toast(error.message,'error');await loadStaffTickets();return;}
-        toast('Warranty request status updated.');
     });
     tbody.addEventListener('click', async e => {
         const row = e.target.closest('tr[data-id]');
@@ -2037,7 +2124,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const footer = $('#footer');
     if (footer) {
         footer.className = 'footer';
-        footer.innerHTML = '<div class="footer-container"><p class="copyright">&copy; 2026 iWant PC Inc. All rights reserved.</p><div class="footer-links"><a href="#">Privacy Policy</a><a href="#">Terms of Service</a><a href="#">Contact Us</a></div></div>';
+        footer.innerHTML = '<div class="footer-container"><p class="copyright">&copy; 2026 iWant PC Inc. All rights reserved.</p><div class="footer-links"><a href="#">Privacy Policy</a><a href="#">Terms of Service</a></div></div>';
     }
     document.addEventListener('click', async e => {
         if (e.target.closest('[data-logout]')) { e.preventDefault(); await sbClient.auth.signOut(); AUTH_USER=null; location.href='login.html'; }
