@@ -2124,7 +2124,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const footer = $('#footer');
     if (footer) {
         footer.className = 'footer';
-        footer.innerHTML = '<div class="footer-container"><p class="copyright">&copy; 2026 iWant PC Inc. All rights reserved.</p><div class="footer-links"><a href="#">Privacy Policy</a><a href="#">Terms of Service</a></div></div>';
+        footer.innerHTML = '<div class="footer-container"><p class="copyright">&copy; 2026 iWant PC Inc. All rights reserved.</p><div class="footer-links"><a href="privacy-policy.html" target="_blank" rel="noopener noreferrer">Privacy Policy</a><a href="terms-of-service.html" target="_blank" rel="noopener noreferrer">Terms of Service</a></div></div>';
     }
     document.addEventListener('click', async e => {
         if (e.target.closest('[data-logout]')) { e.preventDefault(); await sbClient.auth.signOut(); AUTH_USER=null; location.href='login.html'; }
