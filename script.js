@@ -6,6 +6,10 @@
 const SUPABASE_URL = 'https://gvrtyixxtmsaryrphxhu.supabase.co';
 const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_uM3M9u329B9AjYI-K2eVrg_rQ90pObS';
 const IMAGE_BUCKET = 'product-images';
+const GCASH_QR_BUCKET = 'gcash-qr';
+const PAYMENT_PROOF_BUCKET = 'payment-proofs';
+const PAYMENT_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+const PAYMENT_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
 /* Tiny PostgREST client (no library needed). path is relative to /rest/v1/ */
 async function sb(path, { method = 'GET', body, prefer } = {}) {
@@ -1405,37 +1409,190 @@ pages.home = async () => {
 };
 
 pages.checkout = async () => {
-    const user=guard();if(!user)return;
-    if(!(await requireCompleteProfile()))return;
-    const body=$('#checkoutBody');let cart=await loadCartFromDatabase();
-    if(!cart.length){body.innerHTML='<div class="card empty-state"><p>Your cart is empty.</p><a href="home.html" class="btn btn-primary">Browse products</a></div>';return;}
+    const user = guard();
+    if (!user) return;
+    if (!(await requireCompleteProfile())) return;
+
+    const body = $('#checkoutBody');
+    let cart = await loadCartFromDatabase();
+    if (!cart.length) {
+        body.innerHTML = '<div class="card empty-state"><p>Your cart is empty.</p><a href="home.html" class="btn btn-primary">Browse products</a></div>';
+        return;
+    }
+
     await Products.load();
-    cart=cart.map(i=>{const p=Products.get(i.id);return p?{id:p.id,title:p.title,price:p.price,qty:Math.min(i.qty,p.stock)}:null;}).filter(i=>i&&i.qty>0);
-    if(!cart.length)throw new Error('Your cart items are no longer available.');
-    const t=totals(cart),address=[user.address,user.city,user.zip].filter(Boolean).join(', ');
-    $('#summaryRows').innerHTML=cart.map(i=>`<div class="summary-row"><span>${esc(i.title)} (x${i.qty})</span><span>${money(i.price*i.qty)}</span></div>`).join('')+
-      `<div class="summary-row"><span>Subtotal</span><span>${money(t.subtotal)}</span></div><div class="summary-row"><span>Shipping</span><span>${money(t.shipping)}</span></div>`;
-    $('#sumTotal').textContent=money(t.total);$('#shipTo').textContent='Ship to: '+address;
-    $('#checkoutForm').elements.payment.innerHTML='<option value="gcash" selected>GCash</option>';
-    $('#checkoutForm').addEventListener('submit',async e=>{
-        e.preventDefault();const btn=$('button[type="submit"]',e.target);btn.disabled=true;
-        try{
-            const fd=new FormData(e.target),addressPayload={user_id:user.id,street:user.address,city:user.city,postal_code:user.zip,country:'PH',is_default:true};
-            const {data:existing,error:findError}=await sbClient.from('address').select('address_id').eq('user_id',user.id).eq('is_default',true).maybeSingle();
-            if(findError)throw findError;
-            let addressId;
-            if(existing){
-                const {data,error}=await sbClient.from('address').update(addressPayload).eq('address_id',existing.address_id).select('address_id').single();
-                if(error)throw error;addressId=data.address_id;
-            }else{
-                const {data,error}=await sbClient.from('address').insert(addressPayload).select('address_id').single();
-                if(error)throw error;addressId=data.address_id;
+    cart = cart.map(i => {
+        const p = Products.get(i.id);
+        return p ? { id: p.id, title: p.title, price: p.price, qty: Math.min(i.qty, p.stock) } : null;
+    }).filter(i => i && i.qty > 0);
+    if (!cart.length) throw new Error('Your cart items are no longer available.');
+
+    const t = totals(cart);
+    const address = [user.address, user.city, user.zip].filter(Boolean).join(', ');
+    $('#summaryRows').innerHTML = cart.map(i =>
+        `<div class="summary-row"><span>${esc(i.title)} (x${i.qty})</span><span>${money(i.price * i.qty)}</span></div>`
+    ).join('') +
+        `<div class="summary-row"><span>Subtotal</span><span>${money(t.subtotal)}</span></div>` +
+        `<div class="summary-row"><span>Shipping</span><span>${money(t.shipping)}</span></div>`;
+    $('#sumTotal').textContent = money(t.total);
+    $('#shipTo').textContent = 'Ship to: ' + address;
+    $('#checkoutForm').elements.payment.innerHTML = '<option value="gcash" selected>GCash</option>';
+
+    const form = $('#checkoutForm');
+    const submitButton = $('button[type="submit"]', form);
+    const qrImage = $('#gcashQrImage');
+    const qrMissing = $('#gcashQrMissing');
+    const referenceInput = $('#gcashReference');
+    const proofInput = $('#paymentProofInput');
+    const proofPreview = $('#paymentProofPreview');
+    let qrReady = false;
+    let previewUrl = null;
+
+    const refreshSubmitState = () => {
+        const reference = referenceInput.value.trim();
+        const file = proofInput.files?.[0];
+        const referenceValid = /^[A-Za-z0-9-]{6,40}$/.test(reference);
+        const fileValid = !!file && PAYMENT_IMAGE_TYPES.includes(file.type) && file.size <= PAYMENT_IMAGE_MAX_BYTES;
+        submitButton.disabled = !(qrReady && referenceValid && fileValid);
+    };
+
+    // The admin maintains one public QR image at this fixed Storage path.
+    const { data: qrData } = sbClient.storage.from(GCASH_QR_BUCKET).getPublicUrl('current-qr');
+    qrImage.onload = () => {
+        qrReady = true;
+        qrImage.hidden = false;
+        qrImage.style.display = 'block';
+        qrMissing.hidden = true;
+        refreshSubmitState();
+    };
+    qrImage.onerror = () => {
+        qrReady = false;
+        qrImage.hidden = true;
+        qrImage.style.display = 'none';
+        qrMissing.hidden = false;
+        qrMissing.textContent = 'The GCash QR code has not been uploaded by the administrator yet. Please try again later.';
+        refreshSubmitState();
+    };
+    qrImage.src = `${qrData.publicUrl}?v=${Date.now()}`;
+
+    referenceInput.addEventListener('input', refreshSubmitState);
+    proofInput.addEventListener('change', () => {
+        const file = proofInput.files?.[0];
+        if (previewUrl) URL.revokeObjectURL(previewUrl);
+        previewUrl = null;
+        proofPreview.hidden = true;
+        proofPreview.style.display = 'none';
+        proofPreview.removeAttribute('src');
+
+        if (file) {
+            if (!PAYMENT_IMAGE_TYPES.includes(file.type)) {
+                proofInput.value = '';
+                toast('Upload a JPG, PNG, or WEBP image only.', 'error');
+            } else if (file.size > PAYMENT_IMAGE_MAX_BYTES) {
+                proofInput.value = '';
+                toast('Payment proof must be 5 MB or smaller.', 'error');
+            } else {
+                previewUrl = URL.createObjectURL(file);
+                proofPreview.src = previewUrl;
+                proofPreview.hidden = false;
+                proofPreview.style.display = 'block';
             }
-            const {data:orderId,error}=await sbClient.rpc('place_order_secure',{p_address_id:addressId,p_items:cart.map(i=>({component_id:Number(i.id),quantity:i.qty})),p_payment_method:'gcash',p_customer_note:fd.get('note')||''});
-            if(error)throw error;if(!orderId)throw new Error('The database did not return the new order number.');
-            write(KEY.cart,[]);await syncCartToDatabase([]);toast('Order placed and saved to your purchase history.');location.href='myorders.html';
-        }catch(err){toast(err.message,'error');btn.disabled=false;}
+        }
+        refreshSubmitState();
     });
+
+    form.addEventListener('submit', async e => {
+        e.preventDefault();
+        const file = proofInput.files?.[0];
+        const reference = referenceInput.value.trim();
+        if (!qrReady) return toast('The administrator has not uploaded the GCash QR code yet.', 'error');
+        if (!/^[A-Za-z0-9-]{6,40}$/.test(reference)) return toast('Enter a valid GCash transaction reference (6–40 letters or numbers).', 'error');
+        if (!file || !PAYMENT_IMAGE_TYPES.includes(file.type) || file.size > PAYMENT_IMAGE_MAX_BYTES) {
+            return toast('Upload a JPG, PNG, or WEBP payment screenshot up to 5 MB.', 'error');
+        }
+
+        submitButton.disabled = true;
+        try {
+            const fd = new FormData(form);
+            const addressPayload = {
+                user_id: user.id,
+                street: user.address,
+                city: user.city,
+                postal_code: user.zip,
+                country: 'PH',
+                is_default: true
+            };
+
+            const { data: existing, error: findError } = await sbClient
+                .from('address')
+                .select('address_id')
+                .eq('user_id', user.id)
+                .eq('is_default', true)
+                .maybeSingle();
+            if (findError) throw findError;
+
+            let addressId;
+            if (existing) {
+                const { data, error } = await sbClient.from('address')
+                    .update(addressPayload)
+                    .eq('address_id', existing.address_id)
+                    .select('address_id')
+                    .single();
+                if (error) throw error;
+                addressId = data.address_id;
+            } else {
+                const { data, error } = await sbClient.from('address')
+                    .insert(addressPayload)
+                    .select('address_id')
+                    .single();
+                if (error) throw error;
+                addressId = data.address_id;
+            }
+
+            const extension = file.type === 'image/png' ? 'png' : file.type === 'image/webp' ? 'webp' : 'jpg';
+            const randomPart = (window.crypto && crypto.randomUUID)
+                ? crypto.randomUUID()
+                : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+            const proofPath = `${user.id}/${randomPart}.${extension}`;
+
+            const { error: uploadError } = await sbClient.storage
+                .from(PAYMENT_PROOF_BUCKET)
+                .upload(proofPath, file, {
+                    contentType: file.type,
+                    cacheControl: '3600',
+                    upsert: false
+                });
+            if (uploadError) throw uploadError;
+
+            const { data: orderId, error: orderError } = await sbClient.rpc('place_order_with_gcash_proof', {
+                p_address_id: addressId,
+                p_items: cart.map(i => ({ component_id: Number(i.id), quantity: i.qty })),
+                p_payment_method: 'gcash',
+                p_customer_note: fd.get('note') || '',
+                p_transaction_reference: reference,
+                p_proof_path: proofPath
+            });
+            if (orderError) throw orderError;
+            if (!orderId) throw new Error('The database did not return the new order number.');
+
+            write(KEY.cart, []);
+            try {
+                await syncCartToDatabase([]);
+            } catch (cartSyncError) {
+                // The order is already committed. Do not invite a duplicate retry
+                // just because the optional cart cleanup failed.
+                console.warn('Order saved, but cart cleanup did not sync:', cartSyncError);
+            }
+            toast(`Order #${orderId} submitted with payment proof. Staff can view the submitted receipt.`);
+            location.href = 'myorders.html';
+        } catch (err) {
+            console.error('GCash checkout:', err);
+            toast(err.message || 'Could not submit your order and payment proof.', 'error');
+            refreshSubmitState();
+        }
+    });
+
+    refreshSubmitState();
 };
 
 pages.orders = async () => {
@@ -1524,17 +1681,62 @@ pages.settings = async () => {
 
 pages.staff = async () => {
     const staff=guard(['staff','admin']);if(!staff)return;
-    const tbody=$('#queueBody');
-    const load=async()=>{
-        const {data,error}=await sbClient.from('orders').select('*,users(username,email,name),address(*),order_item(*)').order('created_at',{ascending:false});
-        if(error)throw error;
-        const orders=data||[];
-        tbody.innerHTML=orders.length?orders.map(o=>{
-            const items=o.order_item||[], customer=o.users?.name||o.users?.email||'Customer';
-            const action=o.order_status==='toreceive'?'<button class="btn btn-sm btn-ok" data-complete>Order Completed</button>':o.order_status==='completed'?'<span class="status">Completed</span>':'<button class="btn btn-sm btn-primary" data-ship>Update Status</button>';
-            return `<tr data-id="${o.order_id}"><td>#${o.order_id}<button class="btn btn-sm btn-soft" data-expand>Details</button></td><td>${esc(customer)}</td><td>${items.length} item(s)</td><td>${money(o.total_amount)}</td><td><span class="status">${esc(o.order_status)}</span></td><td><input type="date" class="edit-input date" data-date value="${o.delivery_date||''}"></td><td>${esc(o.customer_note||'—')}</td><td>${action}${o.proof_image_url?`<br><a href="${esc(o.proof_image_url)}" target="_blank" rel="noopener">View proof</a>`:''}</td></tr>
-            <tr class="order-detail-row" data-detail-for="${o.order_id}" hidden><td colspan="8"><strong>Shipping address:</strong> ${esc([o.address?.street,o.address?.city,o.address?.postal_code,o.address?.country].filter(Boolean).join(', ')||'No address')}<br><strong>Items:</strong><ul>${items.map(i=>`<li>${esc(i.item_name||'Component')} × ${i.quantity} — ${money(i.unit_price)}</li>`).join('')}</ul><strong>Customer note:</strong> ${esc(o.customer_note||'None')}</td></tr>`;
-        }).join(''):'<tr><td colspan="8" class="table-empty">No orders yet.</td></tr>';
+    const tbody = $('#queueBody');
+    const canViewPaymentProof = staff.role === 'staff';
+    const paymentProofHeader = $('#paymentProofHeader');
+    if (paymentProofHeader) paymentProofHeader.hidden = !canViewPaymentProof;
+    const paymentProofModal = $('#paymentProofModal');
+    const paymentProofImage = $('#paymentProofImage');
+    const paymentProofMeta = $('#paymentProofMeta');
+    let paymentByOrder = new Map();
+
+    const load = async () => {
+        const { data, error } = await sbClient.from('orders')
+            .select('*,users(username,email,name),address(*),order_item(*)')
+            .order('created_at', { ascending: false });
+        if (error) throw error;
+        const orders = data || [];
+
+        paymentByOrder = new Map();
+        if (canViewPaymentProof && orders.length) {
+            const orderIds = orders.map(o => o.order_id);
+            const { data: payments, error: paymentError } = await sbClient.from('payment')
+                .select('order_id,amount,payment_method,transaction_reference,proof_url,payment_status')
+                .in('order_id', orderIds);
+            if (paymentError) throw paymentError;
+            paymentByOrder = new Map((payments || []).map(p => [String(p.order_id), p]));
+        }
+
+        const proofColumnCount = canViewPaymentProof ? 9 : 8;
+        tbody.innerHTML = orders.length ? orders.map(o => {
+            const items = o.order_item || [];
+            const customer = o.users?.name || o.users?.email || 'Customer';
+            const payment = paymentByOrder.get(String(o.order_id));
+            const proofCell = canViewPaymentProof
+                ? `<td>${payment?.proof_url
+                    ? `<button type="button" class="btn btn-sm btn-soft" data-view-payment-proof>View Payment Proof</button><div class="sub">Ref: ${esc(payment.transaction_reference || 'Not provided')}</div>`
+                    : '<span class="stock">No payment proof</span>'}</td>`
+                : '';
+            const action = o.order_status === 'toreceive'
+                ? '<button class="btn btn-sm btn-ok" data-complete>Order Completed</button>'
+                : o.order_status === 'completed'
+                    ? '<span class="status">Completed</span>'
+                    : '<button class="btn btn-sm btn-primary" data-ship>Update Status</button>';
+            return `<tr data-id="${o.order_id}">
+                <td>#${o.order_id}<button class="btn btn-sm btn-soft" data-expand>Details</button></td>
+                <td>${esc(customer)}</td>
+                <td>${items.length} item(s)</td>
+                <td>${money(o.total_amount)}</td>
+                <td><span class="status">${esc(o.order_status)}</span></td>
+                ${proofCell}
+                <td><input type="date" class="edit-input date" data-date value="${o.delivery_date || ''}"></td>
+                <td>${esc(o.customer_note || '—')}</td>
+                <td>${action}${o.proof_image_url ? `<br><a href="${esc(o.proof_image_url)}" target="_blank" rel="noopener">View delivery proof</a>` : ''}</td>
+            </tr>
+            <tr class="order-detail-row" data-detail-for="${o.order_id}" hidden>
+                <td colspan="${proofColumnCount}"><strong>Shipping address:</strong> ${esc([o.address?.street, o.address?.city, o.address?.postal_code, o.address?.country].filter(Boolean).join(', ') || 'No address')}<br><strong>Items:</strong><ul>${items.map(i => `<li>${esc(i.item_name || 'Component')} × ${i.quantity} — ${money(i.unit_price)}</li>`).join('')}</ul><strong>Customer note:</strong> ${esc(o.customer_note || 'None')}</td>
+            </tr>`;
+        }).join('') : `<tr><td colspan="${proofColumnCount}" class="table-empty">No orders yet.</td></tr>`;
         $('#mItems').textContent=Products.list.reduce((n,p)=>n+p.stock,0);
         $('#mSale').textContent=money(orders.filter(o=>o.order_status!=='pending').reduce((n,o)=>n+Number(o.total_amount),0));
         const {count}=await sbClient.from('service_reservation').select('*',{count:'exact',head:true});$('#mBookings').textContent=count||0;
@@ -1565,6 +1767,14 @@ pages.staff = async () => {
     const prettyBookingDate=value=>{if(!value)return 'Not provided';const raw=String(value).slice(0,10);const d=new Date(raw+'T00:00:00');return Number.isNaN(d.getTime())?raw:d.toLocaleDateString('en-PH',{year:'numeric',month:'short',day:'numeric'});};
     load().catch(err=>{console.error('Staff order queue:',err);tbody.innerHTML=`<tr><td colspan="8" class="table-empty">${esc(err.message||'Unable to load orders.')}</td></tr>`;});
     loadStaffTickets().catch(err=>{console.error('Staff service queue:',err);ticketsBody.innerHTML=`<tr><td colspan="9" class="table-empty">${esc(err.message||'Unable to load service requests.')}</td></tr>`;});
+    $('#closePaymentProofModal')?.addEventListener('click', () => paymentProofModal.close());
+    paymentProofModal?.addEventListener('click', e => {
+        if (e.target === paymentProofModal) paymentProofModal.close();
+    });
+    paymentProofModal?.addEventListener('close', () => {
+        paymentProofImage.removeAttribute('src');
+        paymentProofMeta.textContent = '';
+    });
     ticketsBody.addEventListener('click',async e=>{
         const row=e.target.closest('tr[data-id]');if(!row)return;
         const decision=e.target.closest('[data-service-decision]');
@@ -1598,9 +1808,35 @@ pages.staff = async () => {
         if(error){toast(error.message,'error');await loadStaffTickets();return;}
         toast('Warranty request status updated.');
     });
-    tbody.addEventListener('click',async e=>{
-        const row=e.target.closest('tr[data-id]');if(!row)return;
-        if(e.target.closest('[data-expand]')){const detail=$(`[data-detail-for="${row.dataset.id}"]`,tbody);detail.hidden=!detail.hidden;}
+    tbody.addEventListener('click', async e => {
+        const row = e.target.closest('tr[data-id]');
+        if (!row) return;
+
+        if (e.target.closest('[data-view-payment-proof]')) {
+            if (!canViewPaymentProof) return;
+            const payment = paymentByOrder.get(String(row.dataset.id));
+            if (!payment?.proof_url) return toast('No payment proof is attached to this order.', 'error');
+            try {
+                const { data, error } = await sbClient.storage.from(PAYMENT_PROOF_BUCKET)
+                    .createSignedUrl(payment.proof_url, 60);
+                if (error) throw error;
+                paymentProofMeta.innerHTML = `
+                    <div><strong>Order:</strong> #${esc(row.dataset.id)}</div>
+                    <div><strong>Amount:</strong> ${money(payment.amount)}</div>
+                    <div><strong>Transaction reference:</strong> ${esc(payment.transaction_reference || 'Not provided')}</div>
+                    <div><strong>Payment status:</strong> ${esc(payment.payment_status || 'pending')}</div>`;
+                paymentProofImage.src = data.signedUrl;
+                paymentProofModal.showModal();
+            } catch (err) {
+                toast(err.message || 'Could not open the payment proof.', 'error');
+            }
+            return;
+        }
+
+        if (e.target.closest('[data-expand]')) {
+            const detail = $(`[data-detail-for="${row.dataset.id}"]`, tbody);
+            detail.hidden = !detail.hidden;
+        }
         if(e.target.closest('[data-ship]')){
             const date=$('[data-date]',row).value;
             if(!date)return toast('Please set the delivery date first.','error');
@@ -1669,6 +1905,77 @@ function makeDashboardTablesCollapsible(root, labels) {
 pages.admin = async () => {
     const admin=guard(['admin']);if(!admin)return;
     const usersBody=$('#usersBody');
+
+    // Admin-only GCash QR management. Customers only receive public read access to this QR image.
+    const qrInput = $('#gcashQrFile');
+    const qrPreview = $('#gcashQrPreview');
+    const qrStatus = $('#gcashQrStatus');
+    const saveQrButton = $('#saveGcashQrBtn');
+    let selectedQrFile = null;
+    let qrPreviewObjectUrl = null;
+
+    const showCurrentQr = () => {
+        const { data } = sbClient.storage.from(GCASH_QR_BUCKET).getPublicUrl('current-qr');
+        qrPreview.onload = () => {
+            qrPreview.hidden = false;
+            qrPreview.style.display = 'block';
+            qrStatus.textContent = 'Current GCash QR code is available to customers.';
+        };
+        qrPreview.onerror = () => {
+            qrPreview.hidden = true;
+            qrPreview.style.display = 'none';
+            qrStatus.textContent = 'No GCash QR code has been uploaded yet.';
+        };
+        qrPreview.src = `${data.publicUrl}?v=${Date.now()}`;
+    };
+    showCurrentQr();
+
+    qrInput?.addEventListener('change', () => {
+        selectedQrFile = qrInput.files?.[0] || null;
+        if (qrPreviewObjectUrl) URL.revokeObjectURL(qrPreviewObjectUrl);
+        qrPreviewObjectUrl = null;
+        if (!selectedQrFile) {
+            saveQrButton.disabled = true;
+            showCurrentQr();
+            return;
+        }
+        if (!PAYMENT_IMAGE_TYPES.includes(selectedQrFile.type) || selectedQrFile.size > PAYMENT_IMAGE_MAX_BYTES) {
+            selectedQrFile = null;
+            qrInput.value = '';
+            saveQrButton.disabled = true;
+            toast('Choose a JPG, PNG, or WEBP image up to 5 MB.', 'error');
+            return;
+        }
+        qrPreviewObjectUrl = URL.createObjectURL(selectedQrFile);
+        qrPreview.src = qrPreviewObjectUrl;
+        qrPreview.hidden = false;
+        qrPreview.style.display = 'block';
+        qrStatus.textContent = 'Preview selected. Save to publish this QR code to checkout.';
+        saveQrButton.disabled = false;
+    });
+
+    saveQrButton?.addEventListener('click', async () => {
+        if (!selectedQrFile) return toast('Choose a GCash QR image first.', 'error');
+        saveQrButton.disabled = true;
+        try {
+            const { error } = await sbClient.storage.from(GCASH_QR_BUCKET).upload('current-qr', selectedQrFile, {
+                contentType: selectedQrFile.type,
+                cacheControl: '0',
+                upsert: true
+            });
+            if (error) throw error;
+            selectedQrFile = null;
+            qrInput.value = '';
+            if (qrPreviewObjectUrl) URL.revokeObjectURL(qrPreviewObjectUrl);
+            qrPreviewObjectUrl = null;
+            showCurrentQr();
+            toast('GCash QR code updated. Customers will see the new image at checkout.');
+        } catch (err) {
+            toast(err.message || 'Could not save the GCash QR code.', 'error');
+            saveQrButton.disabled = false;
+        }
+    });
+
     const loadUsers=async()=>{
         const {data,error}=await sbClient.from('users').select('user_id,username,email,role,user_role,is_active,name').order('created_at',{ascending:false});
         if(error)throw error;
