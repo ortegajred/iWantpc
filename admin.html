@@ -21,6 +21,27 @@
             <div class="metric-card"><h3>Registered Accounts</h3><div class="metric-value" id="mAccounts">0</div></div>
         </div>
 
+        <section class="card" id="gcashSettingsCard">
+            <div class="section-head">
+                <h2><i class="fa-solid fa-qrcode"></i> GCash QR Payment Settings</h2>
+            </div>
+            <p class="hint">Upload or replace the GCash QR image displayed to customers on the checkout page. Only administrators can change this image.</p>
+            <div class="image-field" style="margin-top:18px">
+                <img class="image-preview" id="gcashQrPreview" alt="Current GCash QR preview" hidden style="display:none">
+                <div class="image-controls">
+                    <span class="label">Current / selected GCash QR image</span>
+                    <div class="btn-row">
+                        <label class="btn btn-sm btn-soft"><i class="fa-solid fa-upload"></i> Choose QR image
+                            <input type="file" id="gcashQrFile" accept="image/png,image/jpeg,image/webp" hidden>
+                        </label>
+                        <button type="button" class="btn btn-sm btn-ok" id="saveGcashQrBtn" disabled><i class="fa-solid fa-floppy-disk"></i> Save QR Code</button>
+                    </div>
+                    <p class="hint" id="gcashQrStatus" role="status">Loading current GCash QR code...</p>
+                    <small class="hint">JPG, PNG, or WEBP. Maximum file size: 5 MB.</small>
+                </div>
+            </div>
+        </section>
+
         <section class="card">
             <div class="section-head">
                 <h2>Product Inventory &amp; Pricing Management</h2>
