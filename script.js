@@ -1598,7 +1598,7 @@ pages.checkout = async () => {
 pages.orders = async () => {
     const user=guard();if(!user)return;
     const list=$('#ordersList');let tab='all',orders=[];
-    const labels={pending:'Pending Payment',toship:'To Ship',toreceive:'To Receive',completed:'Completed',cancelled:'Cancelled'};
+    const labels={pending:'Pending',toship:'To Ship',toreceive:'To Receive',completed:'Completed',cancelled:'Cancelled'};
     const render=()=>{
         const filtered=orders.filter(o=>tab==='all'||o.status===tab);
         list.innerHTML=filtered.length?filtered.map(o=>`<div class="order-card" data-id="${o.id}">
