@@ -1624,23 +1624,120 @@ pages.orders = async () => {
 };
 
 pages.bookings = async () => {
-    const user=guard();if(!user)return;
-    const list=$('#bookingsList');let tab='all',bookings=[];
-    const statusInfo={requested:{label:'Pending',className:'pending'},pending:{label:'Pending',className:'pending'},approved:{label:'Approved',className:'approved'},rejected:{label:'Rejected',className:'rejected'}};
-    const prettyDate=value=>{if(!value)return 'Not selected';const raw=String(value).slice(0,10);const d=new Date(raw+'T00:00:00');return Number.isNaN(d.getTime())?raw:d.toLocaleDateString('en-PH',{year:'numeric',month:'long',day:'numeric'});};
-    const render=()=>{
-        const filtered=bookings.filter(b=>tab==='all'||(tab==='pending'?['requested','pending'].includes(String(b.status).toLowerCase()):String(b.status).toLowerCase()===tab));
-        list.innerHTML=filtered.length?filtered.map(b=>{const st=statusInfo[String(b.status||'requested').toLowerCase()]||{label:b.status||'Pending',className:'pending'};return `
-          <article class="order-card booking-card">
-            <div class="order-header"><span>Booking ID: <span class="order-id">#${esc(b.reservation_id)}</span></span><span class="status ${st.className}"><i class="fa-solid ${st.className==='approved'?'fa-circle-check':st.className==='rejected'?'fa-circle-xmark':'fa-hourglass-half'}"></i> ${esc(st.label)}</span></div>
-            <div class="booking-details-grid"><div><span class="booking-label">Service</span><strong>${esc((b.service_type||'Service').replaceAll('_',' '))}</strong></div><div><span class="booking-label">Device / Part</span><strong>${esc(b.device_details||'—')}</strong></div><div><span class="booking-label">Preferred store visit</span><strong>${prettyDate(b.appointment_date)}</strong></div><div><span class="booking-label">Submitted</span><strong>${prettyDate(b.created_at)}</strong></div></div>
-            <div class="booking-description"><span class="booking-label">Your request</span><p>${esc(b.notes||'No additional details provided.')}</p></div>
-            <div class="booking-feedback"><span class="booking-label"><i class="fa-solid fa-comment-dots"></i> Staff feedback</span><p>${b.staff_feedback?esc(b.staff_feedback):'No feedback from staff yet.'}</p></div>
-          </article>`;}).join(''):'<div class="card empty-state"><i class="fa-solid fa-calendar-xmark"></i><p>No service bookings in this category yet.</p></div>';
+    const user = guard();
+    if (!user) return;
+
+    const list = $('#bookingsList');
+    let tab = 'all';
+    let bookings = [];
+
+    const statusInfo = {
+        requested:  { label: 'Pending', className: 'pending' },
+        submitted:  { label: 'Pending', className: 'pending' },
+        pending:    { label: 'Pending', className: 'pending' },
+        in_progress:{ label: 'In Progress', className: 'pending' },
+        approved:   { label: 'Approved', className: 'approved' },
+        resolved:   { label: 'Resolved', className: 'approved' },
+        rejected:   { label: 'Rejected', className: 'rejected' }
     };
-    const {data,error}=await sbClient.from('service_reservation').select('reservation_id,service_type,status,appointment_date,notes,device_details,staff_feedback,created_at').eq('user_id',user.id).order('created_at',{ascending:false});
-    if(error)throw error;bookings=data||[];render();
-    $('#bookingTabs').addEventListener('click',e=>{const b=e.target.closest('.tab-btn');if(!b)return;$$('#bookingTabs .tab-btn').forEach(x=>x.classList.toggle('active',x===b));tab=b.dataset.tab;render();});
+
+    const prettyDate = value => {
+        if (!value) return 'Not selected';
+        const raw = String(value).slice(0, 10);
+        const date = new Date(raw + 'T00:00:00');
+        return Number.isNaN(date.getTime())
+            ? raw
+            : date.toLocaleDateString('en-PH', { year: 'numeric', month: 'long', day: 'numeric' });
+    };
+
+    const matchesTab = booking => {
+        const status = String(booking.status || 'requested').toLowerCase();
+        if (tab === 'all') return true;
+        if (tab === 'pending') return ['requested', 'submitted', 'pending', 'in_progress'].includes(status);
+        if (tab === 'approved') return ['approved', 'resolved'].includes(status);
+        return status === tab;
+    };
+
+    const render = () => {
+        const filtered = bookings.filter(matchesTab);
+        list.innerHTML = filtered.length ? filtered.map(booking => {
+            const status = String(booking.status || 'requested').toLowerCase();
+            const info = statusInfo[status] || { label: status.replaceAll('_', ' ') || 'Pending', className: 'pending' };
+            const prefix = booking.kind === 'warranty' ? 'WR' : 'SR';
+            const typeLabel = booking.kind === 'warranty'
+                ? 'Warranty Claim'
+                : (booking.service_type || 'Service').replaceAll('_', ' ');
+            return `
+              <article class="order-card booking-card">
+                <div class="order-header">
+                  <span>${booking.kind === 'warranty' ? 'Warranty ID' : 'Booking ID'}: <span class="order-id">#${prefix}-${esc(booking.id)}</span></span>
+                  <span class="status ${info.className}"><i class="fa-solid ${info.className === 'approved' ? 'fa-circle-check' : info.className === 'rejected' ? 'fa-circle-xmark' : 'fa-hourglass-half'}"></i> ${esc(info.label)}</span>
+                </div>
+                <div class="booking-details-grid">
+                  <div><span class="booking-label">Request Type</span><strong>${esc(typeLabel)}</strong></div>
+                  <div><span class="booking-label">Device / Part</span><strong>${esc(booking.device_details || '—')}</strong></div>
+                  <div><span class="booking-label">Preferred store visit</span><strong>${prettyDate(booking.appointment_date)}</strong></div>
+                  <div><span class="booking-label">Submitted</span><strong>${prettyDate(booking.created_at)}</strong></div>
+                </div>
+                <div class="booking-description"><span class="booking-label">Your request</span><p>${esc(booking.notes || 'No additional details provided.')}</p></div>
+                ${booking.receipt_code ? `<div class="booking-description"><span class="booking-label">Purchase / Receipt Reference</span><p>${esc(booking.receipt_code)}</p></div>` : ''}
+                <div class="booking-feedback"><span class="booking-label"><i class="fa-solid fa-comment-dots"></i> Staff feedback</span><p>${booking.staff_feedback ? esc(booking.staff_feedback) : 'No feedback from staff yet.'}</p></div>
+              </article>`;
+        }).join('') : '<div class="card empty-state"><i class="fa-solid fa-calendar-xmark"></i><p>No service bookings or warranty requests in this category yet.</p></div>';
+    };
+
+    // Service bookings and warranty claims are stored in separate Supabase tables.
+    // Fetch both so the customer's page matches the combined staff request queue.
+    const [serviceResult, warrantyResult] = await Promise.all([
+        sbClient.from('service_reservation')
+            .select('reservation_id,service_type,status,appointment_date,notes,device_details,staff_feedback,created_at')
+            .eq('user_id', user.id)
+            .order('created_at', { ascending: false }),
+        sbClient.from('warranty_request')
+            .select('warranty_id,product_id,description,appointment_date,status,staff_feedback,created_at,receipt_code,component:component!warranty_request_product_id_fkey(name)')
+            .eq('user_id', user.id)
+            .order('created_at', { ascending: false })
+    ]);
+
+    if (serviceResult.error) throw serviceResult.error;
+    if (warrantyResult.error) throw warrantyResult.error;
+
+    const serviceBookings = (serviceResult.data || []).map(row => ({
+        kind: 'service',
+        id: row.reservation_id,
+        service_type: row.service_type,
+        status: row.status,
+        appointment_date: row.appointment_date,
+        notes: row.notes,
+        device_details: row.device_details,
+        staff_feedback: row.staff_feedback,
+        created_at: row.created_at
+    }));
+
+    const warrantyBookings = (warrantyResult.data || []).map(row => ({
+        kind: 'warranty',
+        id: row.warranty_id,
+        status: row.status,
+        appointment_date: row.appointment_date,
+        notes: row.description,
+        device_details: row.component?.name || (row.product_id ? `Component #${row.product_id}` : '—'),
+        staff_feedback: row.staff_feedback,
+        created_at: row.created_at,
+        receipt_code: row.receipt_code
+    }));
+
+    bookings = [...serviceBookings, ...warrantyBookings].sort((a, b) =>
+        (new Date(b.created_at || 0).getTime() || 0) - (new Date(a.created_at || 0).getTime() || 0)
+    );
+    render();
+
+    $('#bookingTabs').addEventListener('click', event => {
+        const button = event.target.closest('.tab-btn');
+        if (!button) return;
+        $$('#bookingTabs .tab-btn').forEach(item => item.classList.toggle('active', item === button));
+        tab = button.dataset.tab;
+        render();
+    });
 };
 
 pages.settings = async () => {
