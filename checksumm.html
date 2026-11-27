@@ -28,13 +28,33 @@
                 <label class="field"><span>Message for Seller (Optional)</span>
                     <textarea name="note" rows="4" placeholder="e.g. Please test the items before shipping or call upon arrival..."></textarea>
                 </label>
+
+                <section class="gcash-payment-section" aria-labelledby="gcashPaymentTitle">
+                    <h3 id="gcashPaymentTitle"><i class="fa-solid fa-qrcode"></i> Scan to Pay via GCash</h3>
+                    <p class="hint">Scan the administrator's current GCash QR code and pay the exact total shown in your order summary.</p>
+                    <div class="gcash-qr-wrap">
+                        <img id="gcashQrImage" alt="iWant PC GCash payment QR code" hidden style="display:none;max-width:260px;max-height:260px;width:100%;height:auto;object-fit:contain;background:#fff;padding:10px;border-radius:12px;margin:12px auto;">
+                        <p id="gcashQrMissing" class="hint" role="status">Loading GCash QR code...</p>
+                    </div>
+                    <label class="field">
+                        <span>GCash Transaction Reference Number *</span>
+                        <input id="gcashReference" name="transaction_reference" type="text" required minlength="6" maxlength="40" pattern="[A-Za-z0-9-]{6,40}" autocomplete="off" placeholder="Enter your GCash reference number">
+                    </label>
+                    <label class="field">
+                        <span>Upload Proof of Payment *</span>
+                        <input id="paymentProofInput" name="payment_proof" type="file" accept="image/png,image/jpeg,image/webp" required>
+                        <small class="hint">JPG, PNG, or WEBP only. Maximum file size: 5 MB.</small>
+                    </label>
+                    <img id="paymentProofPreview" alt="Payment proof preview" hidden style="display:none;max-width:100%;max-height:220px;object-fit:contain;border:1px solid rgba(255,255,255,.15);border-radius:10px;padding:6px;margin-top:8px;">
+                    <p class="hint">Your submitted receipt will be visible to authorized staff only. Uploading a screenshot does not itself verify that payment was received.</p>
+                </section>
                 <p class="hint">Payment method: GCash only.</p>
             </div>
             <div class="card">
                 <h2><i class="fa-solid fa-receipt"></i> Order Summary</h2>
                 <div id="summaryRows"></div>
                 <div class="summary-row total-row"><span>Total Amount</span><span id="sumTotal"></span></div>
-                <button type="submit" class="btn btn-ok btn-block" style="margin-top:20px"><i class="fa-solid fa-check"></i> Place Order Now</button>
+                <button type="submit" class="btn btn-ok btn-block" style="margin-top:20px" disabled><i class="fa-solid fa-check"></i> Place Order Now</button>
             </div>
         </form>
     </main>
